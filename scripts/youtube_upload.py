@@ -67,14 +67,73 @@ def get_youtube_client():
     return googleapiclient.discovery.build("youtube", "v3", credentials=creds)
 
 
-def upload_short(video_path: str, title: str, description: str, tags=None):
+def find_existing_short(clip_identifier: str = None, title: str = None, client=None) -> str:
+    """
+    Checks if a Short matching clip_identifier or exact title was already uploaded
+    to the authenticated channel. Uses channel uploads playlist (costs only 1-2 quota units,
+    NOT expensive search.list). Returns full shorts URL or None.
+    """
+    if not clip_identifier and not title:
+        return None
+
+    try:
+        youtube = client or get_youtube_client()
+        # 1. Fetch channel's uploads playlist ID (1 quota unit)
+        ch_resp = youtube.channels().list(part="contentDetails", mine=True).execute()
+        items = ch_resp.get("items", [])
+        if not items:
+            return None
+        uploads_id = items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+        if not uploads_id:
+            return None
+
+        # 2. Fetch the 25 most recent uploads (1 quota unit)
+        pl_resp = youtube.playlistItems().list(
+            part="snippet",
+            playlistId=uploads_id,
+            maxResults=25,
+        ).execute()
+
+        for item in pl_resp.get("items", []):
+            snippet = item.get("snippet", {})
+            vid_id = snippet.get("resourceId", {}).get("videoId")
+            if not vid_id:
+                continue
+            desc = snippet.get("description", "")
+            item_title = snippet.get("title", "")
+
+            # Check for unique clip identifier embedded in description
+            if clip_identifier and f"[id:{clip_identifier}]" in desc:
+                log.info("Found existing YouTube Short for identifier '%s': videoId=%s", clip_identifier, vid_id)
+                return f"https://youtube.com/shorts/{vid_id}"
+
+            # Secondary fallback: exact title match
+            if title and item_title.strip().lower() == title.strip()[:100].lower():
+                log.info("Found existing YouTube Short matching title '%s': videoId=%s", item_title, vid_id)
+                return f"https://youtube.com/shorts/{vid_id}"
+
+    except Exception as e:
+        log.warning("Could not check for existing YouTube upload: %s", e)
+
+    return None
+
+
+def upload_short(video_path: str, title: str, description: str, tags=None, clip_identifier: str = None):
     youtube = get_youtube_client()
+
+    final_desc = description
+    if clip_identifier and f"[id:{clip_identifier}]" not in final_desc:
+        final_desc = f"{description}\n\n[id:{clip_identifier}]".strip()
+
+    final_tags = list(tags or DEFAULT_TAGS)
+    if clip_identifier and clip_identifier not in final_tags:
+        final_tags.append(clip_identifier[:500])
 
     body = {
         "snippet": {
             "title": title[:100],
-            "description": description,
-            "tags": tags or DEFAULT_TAGS,
+            "description": final_desc,
+            "tags": final_tags,
             "categoryId": DEFAULT_CATEGORY_ID,
         },
         "status": {
@@ -109,3 +168,4 @@ def upload_short(video_path: str, title: str, description: str, tags=None):
     video_id = response["id"]
     log.info("Uploaded. Video ID: %s", video_id)
     return f"https://youtube.com/shorts/{video_id}"
+

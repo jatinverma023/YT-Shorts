@@ -99,6 +99,14 @@ ENABLE_ZOOM = VISUAL_MOTION_ENABLED
 BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))
 FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))
 
+# --- Visual Upgrade #1B: Content-Aware Dynamic Emphasis ---
+CONTENT_MOTION_ENABLED = os.environ.get("CONTENT_MOTION_ENABLED", "true").strip().lower() == "true"
+CONTENT_MOTION_MAX_ZOOM = float(os.environ.get("CONTENT_MOTION_MAX_ZOOM", "1.04"))
+CONTENT_MOTION_MIN_ZOOM = float(os.environ.get("CONTENT_MOTION_MIN_ZOOM", "1.00"))
+CONTENT_MOTION_IN_DURATION = float(os.environ.get("CONTENT_MOTION_IN_DURATION", "0.35"))
+CONTENT_MOTION_OUT_DURATION = float(os.environ.get("CONTENT_MOTION_OUT_DURATION", "0.45"))
+CONTENT_MOTION_MAX_POINTS = int(os.environ.get("CONTENT_MOTION_MAX_POINTS", "3"))
+
 # --- Audio & Pacing Optimization ---
 ENABLE_SILENCE_REMOVAL = os.environ.get("ENABLE_SILENCE_REMOVAL", "true").lower() == "true"
 SILENCE_THRESHOLD_SECONDS = float(os.environ.get("SILENCE_THRESHOLD_SECONDS", "0.7"))

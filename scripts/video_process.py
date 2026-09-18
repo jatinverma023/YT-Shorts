@@ -9,17 +9,38 @@ Video processing pipeline for YouTube Shorts:
 """
 import logging
 import os
+import re
 import subprocess
 
-from config import (
-    TARGET_WIDTH, TARGET_HEIGHT, ENABLE_ZOOM, BG_ZOOM_SPEED, FG_ZOOM_SPEED,
-    ENABLE_SILENCE_REMOVAL, SILENCE_THRESHOLD_SECONDS, SILENCE_PADDING_SECONDS,
-    ENABLE_LOUDNORM, LOUDNORM_TARGET_I,
-    VISUAL_CONTRAST, VISUAL_SATURATION, VISUAL_BRIGHTNESS, VISUAL_SHARPEN_AMOUNT,
-    VISUAL_VIGNETTE_ENABLED, VISUAL_VIGNETTE_STRENGTH,
-    VISUAL_MOTION_ENABLED, VISUAL_MOTION_MAX_ZOOM,
-    BG_BRIGHTNESS, BG_SATURATION, FOREGROUND_SCALE, TARGET_FPS,
-)
+try:
+    from config import (
+        TARGET_WIDTH, TARGET_HEIGHT, ENABLE_ZOOM, BG_ZOOM_SPEED, FG_ZOOM_SPEED,
+        ENABLE_SILENCE_REMOVAL, SILENCE_THRESHOLD_SECONDS, SILENCE_PADDING_SECONDS,
+        ENABLE_LOUDNORM, LOUDNORM_TARGET_I,
+        VISUAL_CONTRAST, VISUAL_SATURATION, VISUAL_BRIGHTNESS, VISUAL_SHARPEN_AMOUNT,
+        VISUAL_VIGNETTE_ENABLED, VISUAL_VIGNETTE_STRENGTH,
+        VISUAL_MOTION_ENABLED, VISUAL_MOTION_MAX_ZOOM,
+        CONTENT_MOTION_ENABLED, CONTENT_MOTION_MAX_ZOOM, CONTENT_MOTION_MIN_ZOOM,
+        CONTENT_MOTION_IN_DURATION, CONTENT_MOTION_OUT_DURATION, CONTENT_MOTION_MAX_POINTS,
+        BG_BRIGHTNESS, BG_SATURATION, FOREGROUND_SCALE, TARGET_FPS,
+    )
+except ImportError:
+    from scripts.config import (
+        TARGET_WIDTH, TARGET_HEIGHT, ENABLE_ZOOM, BG_ZOOM_SPEED, FG_ZOOM_SPEED,
+        ENABLE_SILENCE_REMOVAL, SILENCE_THRESHOLD_SECONDS, SILENCE_PADDING_SECONDS,
+        ENABLE_LOUDNORM, LOUDNORM_TARGET_I,
+        VISUAL_CONTRAST, VISUAL_SATURATION, VISUAL_BRIGHTNESS, VISUAL_SHARPEN_AMOUNT,
+        VISUAL_VIGNETTE_ENABLED, VISUAL_VIGNETTE_STRENGTH,
+        VISUAL_MOTION_ENABLED, VISUAL_MOTION_MAX_ZOOM,
+        CONTENT_MOTION_ENABLED, CONTENT_MOTION_MAX_ZOOM, CONTENT_MOTION_MIN_ZOOM,
+        CONTENT_MOTION_IN_DURATION, CONTENT_MOTION_OUT_DURATION, CONTENT_MOTION_MAX_POINTS,
+        BG_BRIGHTNESS, BG_SATURATION, FOREGROUND_SCALE, TARGET_FPS,
+    )
+
+try:
+    import content_motion
+except ImportError:
+    from scripts import content_motion
 
 log = logging.getLogger("video_process")
 
@@ -284,11 +305,80 @@ def build_micro_motion_filter(fps: float = 30.0, max_zoom: float = VISUAL_MOTION
     )
 
 
-def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool = True):
+def _ass_time_to_seconds(time_str: str) -> float:
+    """Converts ASS timestamp H:MM:SS.cc to seconds float."""
+    try:
+        parts = time_str.strip().split(":")
+        if len(parts) == 3:
+            h = float(parts[0])
+            m = float(parts[1])
+            s = float(parts[2])
+            return h * 3600.0 + m * 60.0 + s
+    except (ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def extract_words_from_ass(ass_path: str) -> list:
+    """
+    Extracts word-level timestamps from an ASS caption file.
+    Extracts Dialogue events with Style 'Default', ignoring HeaderPunchline.
+    """
+    if not ass_path or not os.path.isfile(ass_path):
+        return []
+
+    words = []
+    try:
+        with open(ass_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("Dialogue:"):
+                    continue
+                parts = line.split(",", 9)
+                if len(parts) < 10:
+                    continue
+                style = parts[3].strip()
+                if style != "Default":
+                    continue
+                start_str = parts[1].strip()
+                end_str = parts[2].strip()
+                raw_text = parts[9].strip()
+
+                start_sec = _ass_time_to_seconds(start_str)
+                end_sec = _ass_time_to_seconds(end_str)
+
+                # Extract active word if pop highlight style is present
+                m = re.search(r"\{\\c[^\}]+\\fscx110[^\}]*\}(.*?)\{\\c", raw_text)
+                if m:
+                    w_text = m.group(1).strip()
+                else:
+                    clean = re.sub(r"\{[^\}]*\}", "", raw_text).replace("\\N", " ").strip()
+                    w_text = clean
+
+                if w_text:
+                    words.append({
+                        "word": w_text,
+                        "start": start_sec,
+                        "end": end_sec,
+                    })
+    except Exception as e:
+        log.warning("Failed to extract words from ASS file %s: %s", ass_path, e)
+        return []
+
+    return words
+
+
+def build_ffmpeg_filter(
+    input_path: str,
+    ass_path: str = None,
+    has_audio: bool = True,
+    words: list = None,
+    emphasis_points: list = None,
+):
     """
     Constructs the FFmpeg filtergraph and stream mappings:
     - Vertical Short framing (blurred/dimmed backdrop for landscape, centered sharp foreground)
-    - Deterministic foreground micro-motion (subtle breathing zoom, no frame rate alteration)
+    - Deterministic foreground motion: Content-Aware Dynamic Emphasis (#1B) with Sinusoidal fallback (#1A.1)
     - Professional color grading (contrast, saturation, brightness, unsharp)
     - Subtle 9:16 elliptical vignette on final composition
     - Burned-in ASS captions (karaoke/pop style, completely unaltered)
@@ -310,11 +400,49 @@ def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool =
     else:
         vignette_filter = None
 
-    # 3. Micro-motion filter (applied strictly to the visual foreground layer)
-    if VISUAL_MOTION_ENABLED and VISUAL_MOTION_MAX_ZOOM > 1.0:
-        motion_filter = build_micro_motion_filter(fps=fps, max_zoom=VISUAL_MOTION_MAX_ZOOM)
-    else:
+    # 3. Motion filter (applied strictly to visual foreground layer, never stacked)
+    # Content-Aware Dynamic Emphasis (Visual #1B) with #1A.1 fallback
+    effective_max_zoom = min(
+        float(VISUAL_MOTION_MAX_ZOOM),
+        float(CONTENT_MOTION_MAX_ZOOM),
+        1.04,
+    )
+
+    if not VISUAL_MOTION_ENABLED or effective_max_zoom <= 1.0:
         motion_filter = None
+    else:
+        active_points = None
+        if CONTENT_MOTION_ENABLED:
+            if emphasis_points is not None:
+                active_points = content_motion.filter_and_deduplicate_emphasis_points(
+                    emphasis_points,
+                    clip_duration=get_duration_seconds(input_path),
+                    max_points=CONTENT_MOTION_MAX_POINTS,
+                )
+            else:
+                transcript_words = words
+                if transcript_words is None and ass_path:
+                    transcript_words = extract_words_from_ass(ass_path)
+
+                if transcript_words:
+                    dur = get_duration_seconds(input_path)
+                    active_points = content_motion.detect_emphasis_points(
+                        words=transcript_words,
+                        clip_duration=dur,
+                        max_points=CONTENT_MOTION_MAX_POINTS,
+                    )
+
+        if CONTENT_MOTION_ENABLED and active_points:
+            log.info("Visual #1B: Using content-aware dynamic emphasis with %d points", len(active_points))
+            motion_filter = content_motion.build_content_motion_filter(
+                emphasis_points=active_points,
+                fps=fps,
+                clip_duration=get_duration_seconds(input_path),
+                max_zoom=effective_max_zoom,
+            )
+        else:
+            log.info("Visual #1A.1: Using fallback sinusoidal micro-motion (max_zoom=%.2fx)", effective_max_zoom)
+            motion_filter = build_micro_motion_filter(fps=fps, max_zoom=effective_max_zoom)
 
     # 4. Subtitle burning filter (applied LAST to visual canvas)
     if ass_path and os.path.isfile(ass_path):
@@ -401,7 +529,8 @@ def process_video(input_path: str, output_path: str, ass_path: str = None, max_s
     - Full stderr logging on failure
     """
     has_audio = check_has_audio(input_path)
-    filt, maps = build_ffmpeg_filter(input_path, ass_path, has_audio=has_audio)
+    words = extract_words_from_ass(ass_path) if ass_path else None
+    filt, maps = build_ffmpeg_filter(input_path, ass_path, has_audio=has_audio, words=words)
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     if max_seconds:

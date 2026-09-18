@@ -9,6 +9,7 @@ import re
 from openai import OpenAI
 from config import GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL
 from clip_detection import _get_best_groq_model
+import hook_generator
 
 log = logging.getLogger("metadata_ai")
 
@@ -123,9 +124,21 @@ Respond ONLY with valid JSON in this exact structure:
         title_2 = sanitize_title(data.get("title_2"), f"Insight: {fb}")
         title_3 = sanitize_title(data.get("title_3"), f"Must Watch: {fb}")
 
-        raw_punchline = str(data.get("punchline", "")).strip().strip('"').strip("'")
-        raw_punchline = raw_punchline.replace("{", "").replace("}", "")
-        punchline = raw_punchline[:60] if raw_punchline else f"{fb[:45]} ✨"
+        # Validate or generate authentic short-form hook using Hook Upgrade #1
+        raw_punchline = str(data.get("punchline", "")).strip()
+        cand = {"hook": raw_punchline, "hook_type": "curiosity"}
+        is_valid, _ = hook_generator.validate_hook(cand, transcript=transcript, filename=filename)
+        if is_valid:
+            punchline = cand["hook"]
+        else:
+            detected_lang = "hi" if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in transcript) else "en"
+            hook_res = hook_generator.generate_short_hook(
+                transcript=transcript,
+                hook_summary=raw_punchline,
+                filename=filename,
+                detected_lang=detected_lang,
+            )
+            punchline = hook_res["selected_hook"]
 
         description = str(data.get("description", "")).strip()
         tags = list(data.get("tags", ["shorts", "podcast", "viral"]))
@@ -137,6 +150,7 @@ Respond ONLY with valid JSON in this exact structure:
             "title": title_1,
             "title_variants": [title_1, title_2, title_3],
             "punchline": punchline,
+            "generated_hook": punchline,
             "description": description,
             "tags": tags,
         }
@@ -144,17 +158,26 @@ Respond ONLY with valid JSON in this exact structure:
         log.warning("AI metadata generation failed: %s. Using fallback.", e)
         fb = clean_filename_fallback(filename)
         t1 = f"{fb[:75]} #shorts"
+        detected_lang = "hi" if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in transcript) else "en"
+        fb_hook = hook_generator.get_fallback_hook(detected_lang=detected_lang)
+        punchline = fb_hook["hook"]
         return {
             "title": t1,
             "title_variants": [t1, f"Secret to {fb[:60]} #shorts", f"Watch this: {fb[:60]} #shorts"],
-            "punchline": f"{fb[:45]} ✨",
+            "punchline": punchline,
+            "generated_hook": punchline,
             "description": f"{fb}\n\n#shorts #podcast #viral",
             "tags": ["shorts", "podcast", "viral"],
         }
 
 
-def generate_punchline(filename: str, transcript: str = "", hook_summary: str = "") -> str:
-    """Convenience helper to extract or generate a punchline hook for a clip."""
-    meta = generate_shorts_metadata(filename, transcript=transcript)
-    return meta.get("punchline") or hook_summary or clean_filename_fallback(filename)
+def generate_punchline(filename: str, transcript: str = "", hook_summary: str = "", detected_lang: str = "en") -> str:
+    """Convenience helper to extract or generate a validated short-form punchline hook for a clip."""
+    hook_res = hook_generator.generate_short_hook(
+        transcript=transcript,
+        hook_summary=hook_summary,
+        filename=filename,
+        detected_lang=detected_lang,
+    )
+    return hook_res["selected_hook"]
 

@@ -2,13 +2,24 @@ name: YouTube Shorts Automation Pipeline
 
 on:
   schedule:
-    # 10:00 AM IST (04:30 UTC)
+    # 10:00 AM IST (04:30 UTC) every day - Asia/Kolkata (UTC+05:30)
     - cron: "30 4 * * *"
+    # Optional subsequent publication slots for queued clips:
     # 3:00 PM IST (09:30 UTC)
     - cron: "30 9 * * *"
     # 8:00 PM IST (14:30 UTC)
     - cron: "30 14 * * *"
-  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run mode (inspect clips & log plan without rendering/uploading)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: shorts-pipeline
+  cancel-in-progress: false
 
 jobs:
   process-videos:
@@ -46,6 +57,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DRY_RUN_LOG_ONLY: ${{ inputs.dry_run || 'false' }}
+          GITHUB_TRIGGER: ${{ github.event_name }}
         run: python main.py
 
 

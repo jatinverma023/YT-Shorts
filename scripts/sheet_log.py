@@ -6,6 +6,7 @@ Columns: timestamp | source_filename | status | detected_lang | youtube_url | er
 import datetime
 import json
 import logging
+import time
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -159,25 +160,87 @@ def get_next_pending_clip(service=None):
     return None
 
 
-def update_clip_status(row_number: int, status: str, youtube_url: str = "", error: str = "", service=None):
-    """Updates the status and updated_at timestamp of a specific row in the clip_queue."""
+def get_pending_clips_for_video(drive_file_id: str, service=None) -> list:
+    """
+    Finds all pending clips in the durable queue for a specific source video (by drive_file_id).
+    Returns list of (row_number, clip_dict) ordered by clip_index ascending.
+    """
+    service = service or get_sheets_service()
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!A:M",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for video %s: %s", drive_file_id, e)
+        return []
+
+    rows = resp.get("values", [])
+    if len(rows) <= 1:
+        return []
+
+    pending = []
+    for idx, row in enumerate(rows[1:], start=2):
+        padded = row + [""] * (13 - len(row))
+        if padded[1].strip() == drive_file_id.strip():
+            status = padded[6].strip().lower()
+            if status == "pending":
+                try:
+                    clip_data = {
+                        "source_video_name": padded[0],
+                        "drive_file_id": padded[1],
+                        "clip_index": int(padded[2]) if padded[2] else 1,
+                        "start_time": float(padded[3]),
+                        "end_time": float(padded[4]),
+                        "hook_summary": padded[5],
+                        "status": "pending",
+                        "youtube_url": padded[7],
+                        "error": padded[8],
+                        "punchline": padded[11].strip() if len(padded) > 11 else "",
+                        "quality_score": float(padded[12]) if len(padded) > 12 and padded[12] else 0.0,
+                    }
+                    pending.append((idx, clip_data))
+                except (ValueError, IndexError) as err:
+                    log.warning("Skipping malformed queue row %d for video %s: %s", idx, drive_file_id, err)
+                    continue
+
+    pending.sort(key=lambda x: x[1]["clip_index"])
+    return pending
+
+
+def update_clip_status(row_number: int, status: str, youtube_url: str = "", error: str = "", service=None, max_retries: int = 3):
+    """Updates the status and updated_at timestamp of a specific row in the clip_queue with retry logic."""
     service = service or get_sheets_service()
     now = datetime.datetime.utcnow().isoformat()
-    # Update columns G:I (status, youtube_url, error)
-    service.spreadsheets().values().update(
-        spreadsheetId=LOG_SHEET_ID,
-        range=f"{CLIP_QUEUE_TAB}!G{row_number}:I{row_number}",
-        valueInputOption="RAW",
-        body={"values": [[status, youtube_url, error]]},
-    ).execute()
-    # Update column K (updated_at)
-    service.spreadsheets().values().update(
-        spreadsheetId=LOG_SHEET_ID,
-        range=f"{CLIP_QUEUE_TAB}!K{row_number}",
-        valueInputOption="RAW",
-        body={"values": [[now]]},
-    ).execute()
-    log.info("Updated queue row %d -> status: %s", row_number, status)
+    last_err = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Update columns G:I (status, youtube_url, error)
+            service.spreadsheets().values().update(
+                spreadsheetId=LOG_SHEET_ID,
+                range=f"{CLIP_QUEUE_TAB}!G{row_number}:I{row_number}",
+                valueInputOption="RAW",
+                body={"values": [[status, youtube_url, error]]},
+            ).execute()
+            # Update column K (updated_at)
+            service.spreadsheets().values().update(
+                spreadsheetId=LOG_SHEET_ID,
+                range=f"{CLIP_QUEUE_TAB}!K{row_number}",
+                valueInputOption="RAW",
+                body={"values": [[now]]},
+            ).execute()
+            log.info("Updated queue row %d -> status: %s (attempt %d)", row_number, status, attempt)
+            return
+        except Exception as err:
+            last_err = err
+            log.warning("Attempt %d/%d to update queue row %d failed: %s", attempt, max_retries, row_number, err)
+            if attempt < max_retries:
+                time.sleep(1.0 * attempt)
+
+    log.error("Failed to update queue row %d after %d attempts: %s", row_number, max_retries, last_err)
+    raise last_err
+
 
 
 def reset_expired_quota_clips(min_age_hours: float = 20.0, service=None) -> int:
@@ -393,3 +456,24 @@ def log_run(filename, status, detected_lang="", youtube_url="", title_1="", titl
         body={"values": row},
     ).execute()
     log.info("Logged run for %s: %s (Title: %s)", filename, status, title_1)
+
+
+def get_enqueued_video_ids(service=None) -> set:
+    """
+    Returns the set of all unique Google Drive file IDs that have ever been enqueued in clip_queue.
+    Guarantees that a long video is never duplicated or re-enqueued.
+    """
+    service = service or get_sheets_service()
+    enqueued_ids = set()
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:B",
+        ).execute()
+        rows = resp.get("values", [])
+        for row in rows[1:]:  # skip header row
+            if row and row[0].strip():
+                enqueued_ids.add(row[0].strip())
+    except Exception as e:
+        log.warning("Could not fetch enqueued video IDs from clip_queue: %s", e)
+    return enqueued_ids
