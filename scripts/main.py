@@ -43,17 +43,17 @@ def process_one(service, file_info):
         drive_utils.download_file(service, file_id, src_path)
 
         duration = video_process.get_duration_seconds(src_path)
+        clip_duration = min(duration, MAX_SHORT_SECONDS)
         if duration > MAX_SHORT_SECONDS:
             log.warning(
-                "%s is %.1fs (> %ds). Uploading trimmed/first %ds only. "
-                "Consider pre-splitting long episodes into clips before this stage.",
+                "%s is %.1fs (> %ds). Trimming to first %ds for YouTube Shorts format.",
                 name, duration, MAX_SHORT_SECONDS, MAX_SHORT_SECONDS,
             )
 
-        transcribe.extract_audio(src_path, audio_path)
+        transcribe.extract_audio(src_path, audio_path, max_seconds=clip_duration)
         _, detected_lang = transcribe.transcribe_to_srt(audio_path, srt_path)
 
-        video_process.process_video(src_path, srt_path, out_path)
+        video_process.process_video(src_path, srt_path, out_path, max_seconds=clip_duration)
 
         title = base.replace("_", " ").replace("-", " ").strip()[:90] + " #shorts"
         description = (

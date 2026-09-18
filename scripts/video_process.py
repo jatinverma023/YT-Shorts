@@ -39,16 +39,20 @@ def build_ffmpeg_filter(srt_path: str) -> str:
     return f"{scale_crop},{subs}"
 
 
-def process_video(input_path: str, srt_path: str, output_path: str):
+def process_video(input_path: str, srt_path: str, output_path: str, max_seconds=None):
     vf = build_ffmpeg_filter(srt_path)
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
+    ]
+    if max_seconds:
+        cmd.extend(["-t", str(max_seconds)])
+    cmd.extend([
         "-vf", vf,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         output_path,
-    ]
+    ])
     log.info("Running ffmpeg: %s", " ".join(cmd))
     subprocess.run(cmd, check=True, capture_output=True)
     return output_path

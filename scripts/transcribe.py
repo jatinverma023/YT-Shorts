@@ -24,13 +24,12 @@ def get_transcribe_client():
         return OpenAI(api_key=api_key), "whisper-1"
 
 
-def extract_audio(video_path, audio_path):
-    """Pull a mono 16kHz wav out of the video for transcription."""
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-ac", "1", "-ar", "16000",
-        audio_path,
-    ]
+def extract_audio(video_path, audio_path, max_seconds=None):
+    """Pull a mono 16kHz wav out of the video for transcription, optionally trimmed."""
+    cmd = ["ffmpeg", "-y", "-i", video_path]
+    if max_seconds:
+        cmd.extend(["-t", str(max_seconds)])
+    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", audio_path])
     subprocess.run(cmd, check=True, capture_output=True)
     return audio_path
 
