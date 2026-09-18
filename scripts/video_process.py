@@ -51,14 +51,14 @@ def get_duration_seconds(input_path: str) -> float:
 def extract_clip_segment(source_path: str, start_time: float, end_time: float, output_path: str) -> str:
     """
     Extracts an exact time slice from the source video (start_time to end_time).
-    Uses fast seeking with re-encoding to guarantee frame-accurate boundaries and avoid
-    frozen audio/video frames at the cut point.
+    Accurate timestamp-based FFmpeg extraction with re-encoding to guarantee
+    accurate boundaries and avoid frozen audio/video frames at the cut point.
     """
     duration = max(1.0, end_time - start_time)
     cmd = [
         "ffmpeg", "-y",
-        "-ss", f"{start_time:.3f}",
         "-i", source_path,
+        "-ss", f"{start_time:.3f}",
         "-t", f"{duration:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-c:a", "aac", "-b:a", "128k",
