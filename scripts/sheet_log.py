@@ -57,14 +57,14 @@ def ensure_clip_queue_sheet(service=None):
                 },
             ).execute()
 
-        # Check if headers exist
+        # Check if headers exist and are complete
         header_resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
             range=f"{CLIP_QUEUE_TAB}!A1:L1",
         ).execute()
         rows = header_resp.get("values", [])
-        if not rows or not rows[0]:
-            log.info("Adding headers to '%s' tab...", CLIP_QUEUE_TAB)
+        if not rows or not rows[0] or len(rows[0]) < len(QUEUE_HEADERS):
+            log.info("Updating headers in '%s' tab...", CLIP_QUEUE_TAB)
             service.spreadsheets().values().update(
                 spreadsheetId=LOG_SHEET_ID,
                 range=f"{CLIP_QUEUE_TAB}!A1:L1",
@@ -256,7 +256,7 @@ def get_clip_by_status(target_status: str, service=None):
     try:
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
-            range=f"{CLIP_QUEUE_TAB}!A:K",
+            range=f"{CLIP_QUEUE_TAB}!A:L",
         ).execute()
     except Exception as e:
         log.warning("Failed to fetch clip queue from sheet: %s", e)
@@ -267,7 +267,7 @@ def get_clip_by_status(target_status: str, service=None):
         return None
 
     for idx, row in enumerate(rows[1:], start=2):
-        padded = row + [""] * (11 - len(row))
+        padded = row + [""] * (12 - len(row))
         status = padded[6].strip().lower()
         if status == target_status.lower():
             try:
@@ -281,6 +281,7 @@ def get_clip_by_status(target_status: str, service=None):
                     "status": status,
                     "youtube_url": padded[7],
                     "error": padded[8],
+                    "punchline": padded[11].strip() if len(padded) > 11 else "",
                 }
             except (ValueError, IndexError) as err:
                 log.warning("Skipping malformed row %d: %s", idx, err)
@@ -294,7 +295,7 @@ def cancel_clips_for_video(drive_file_id: str, reason: str = "source_video_delet
     try:
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
-            range=f"{CLIP_QUEUE_TAB}!A:K",
+            range=f"{CLIP_QUEUE_TAB}!A:L",
         ).execute()
     except Exception as e:
         log.warning("Failed to fetch clip queue for cancellation: %s", e)

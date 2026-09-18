@@ -3,7 +3,10 @@ Transcribe audio with word-level timestamps (Groq Whisper-large-v3 or OpenAI Whi
 and generate animated, word-level karaoke/pop-style burned-in ASS captions.
 """
 import logging
+import math
+import os
 import subprocess
+import time
 
 from openai import OpenAI
 
@@ -31,13 +34,13 @@ def get_transcribe_client():
 
 
 def extract_audio(video_path, audio_path, max_seconds=None):
-    """Pull mono 16kHz audio (WAV or 64k MP3) out of the video for transcription, optionally trimmed."""
+    """Pull mono 16kHz audio (WAV or 32k MP3) out of the video for transcription, optionally trimmed."""
     cmd = ["ffmpeg", "-y", "-i", video_path]
     if max_seconds:
         cmd.extend(["-t", str(max_seconds)])
     cmd.extend(["-vn", "-ac", "1", "-ar", "16000"])
     if audio_path.lower().endswith(".mp3"):
-        cmd.extend(["-b:a", "64k"])
+        cmd.extend(["-b:a", "32k"])
     cmd.append(audio_path)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -64,9 +67,137 @@ def _format_ass_time(seconds: float) -> str:
     return f"{hh}:{mm:02d}:{ss:02d}.{centis:02d}"
 
 
+def _transcribe_file_single(client, whisper_model, file_path: str):
+    """Transcribes a single audio file with retry logic for network resilience."""
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            with open(file_path, "rb") as f:
+                try:
+                    return client.audio.transcriptions.create(
+                        model=whisper_model,
+                        file=f,
+                        response_format="verbose_json",
+                        timestamp_granularities=["word", "segment"],
+                    )
+                except Exception as e:
+                    log.warning("Word timestamp request failed (%s). Retrying with verbose_json.", e)
+                    f.seek(0)
+                    return client.audio.transcriptions.create(
+                        model=whisper_model,
+                        file=f,
+                        response_format="verbose_json",
+                    )
+        except Exception as err:
+            last_err = err
+            log.warning("Whisper transcription attempt %d/3 failed: %s. Retrying in %ds...", attempt, err, attempt * 2)
+            time.sleep(attempt * 2)
+    raise last_err
+
+
+def _transcribe_large_audio(audio_path: str, client, whisper_model: str) -> dict:
+    """
+    Splits long audio (>20MB or multi-hour) into 10-minute (600s) chunks,
+    transcribes each chunk independently, offsets timestamps, and merges cleanly.
+    Guarantees that files never exceed Groq's 25MB upload limit.
+    """
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
+    ]
+    try:
+        total_duration = float(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip())
+    except Exception as e:
+        log.warning("Could not probe audio duration (%s). Defaulting to 3600s.", e)
+        total_duration = 3600.0
+
+    chunk_seconds = 600.0
+    num_chunks = int(math.ceil(total_duration / chunk_seconds))
+    base_dir = os.path.dirname(audio_path)
+    base_name = os.path.splitext(os.path.basename(audio_path))[0]
+
+    log.info(
+        "Audio file %s is %.1f MB (duration: %.1fs). Splitting into %d chunks of %ds for Whisper transcription...",
+        audio_path, os.path.getsize(audio_path) / (1024 * 1024), total_duration, num_chunks, int(chunk_seconds),
+    )
+
+    all_words = []
+    all_segments = []
+    text_parts = []
+    detected_lang = "unknown"
+
+    for i in range(num_chunks):
+        c_start = i * chunk_seconds
+        c_dur = min(chunk_seconds, total_duration - c_start)
+        if c_dur <= 0.5:
+            break
+        chunk_file = os.path.join(base_dir, f"{base_name}_chunk{i}.mp3")
+        cmd_extract = [
+            "ffmpeg", "-y",
+            "-ss", f"{c_start:.3f}",
+            "-t", f"{c_dur:.3f}",
+            "-i", audio_path,
+            "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k",
+            chunk_file,
+        ]
+        try:
+            subprocess.run(cmd_extract, check=True, capture_output=True, text=True)
+            log.info("Transcribing chunk %d/%d [%.1fs - %.1fs]...", i + 1, num_chunks, c_start, c_start + c_dur)
+            chunk_res = _transcribe_file_single(client, whisper_model, chunk_file)
+
+            lang = getattr(chunk_res, "language", "unknown")
+            if detected_lang == "unknown" and lang != "unknown":
+                detected_lang = lang
+
+            txt = getattr(chunk_res, "text", "").strip()
+            if txt:
+                text_parts.append(txt)
+
+            c_words = getattr(chunk_res, "words", None) or []
+            for w in c_words:
+                w_dict = w if isinstance(w, dict) else w.__dict__
+                word_text = str(w_dict.get("word", "")).strip()
+                if word_text:
+                    all_words.append({
+                        "word": word_text,
+                        "start": round(float(w_dict.get("start", 0.0)) + c_start, 3),
+                        "end": round(float(w_dict.get("end", 0.0)) + c_start, 3),
+                    })
+
+            c_segs = getattr(chunk_res, "segments", None) or []
+            for s in c_segs:
+                s_dict = s if isinstance(s, dict) else s.__dict__
+                seg_text = str(s_dict.get("text", "")).strip()
+                if seg_text:
+                    all_segments.append({
+                        "text": seg_text,
+                        "start": round(float(s_dict.get("start", 0.0)) + c_start, 3),
+                        "end": round(float(s_dict.get("end", 0.0)) + c_start, 3),
+                    })
+        finally:
+            if os.path.exists(chunk_file):
+                try:
+                    os.remove(chunk_file)
+                except Exception:
+                    pass
+
+    full_text = " ".join(text_parts).strip()
+    log.info(
+        "Finished chunked transcription: %d words across %d segments. Language: %s",
+        len(all_words), len(all_segments), detected_lang,
+    )
+    return {
+        "text": full_text,
+        "language": detected_lang,
+        "words": all_words,
+        "segments": all_segments,
+    }
+
+
 def transcribe_audio(audio_path):
     """
     Calls Whisper with verbose_json and word-level timestamps.
+    Automatically handles files exceeding the 20MB safe limit by chunking.
     Returns:
       {
         "text": full_text_string,
@@ -76,23 +207,13 @@ def transcribe_audio(audio_path):
       }
     """
     client, whisper_model = get_transcribe_client()
-    with open(audio_path, "rb") as f:
-        # Request both word and segment timestamps
-        try:
-            result = client.audio.transcriptions.create(
-                model=whisper_model,
-                file=f,
-                response_format="verbose_json",
-                timestamp_granularities=["word", "segment"],
-            )
-        except Exception as e:
-            log.warning("Word timestamp request failed (%s). Retrying with verbose_json.", e)
-            f.seek(0)
-            result = client.audio.transcriptions.create(
-                model=whisper_model,
-                file=f,
-                response_format="verbose_json",
-            )
+    file_size = os.path.getsize(audio_path)
+    MAX_DIRECT_BYTES = 20 * 1024 * 1024  # 20MB threshold to guarantee safety against 25MB limit
+
+    if file_size > MAX_DIRECT_BYTES:
+        return _transcribe_large_audio(audio_path, client, whisper_model)
+
+    result = _transcribe_file_single(client, whisper_model, audio_path)
 
     detected_lang = getattr(result, "language", "unknown")
     full_text = getattr(result, "text", "").strip()

@@ -18,12 +18,11 @@ log = logging.getLogger("clip_detection")
 
 def _get_best_groq_model(client):
     preferred = [
-        "openai/gpt-oss-120b",
         "llama-3.3-70b-versatile",
         "llama-3.1-70b-versatile",
-        "openai/gpt-oss-20b",
-        "groq/compound",
-        "qwen/qwen3.8-27b",
+        "llama3-70b-8192",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
     ]
     try:
         models = [m.id for m in client.models.list().data]
@@ -35,7 +34,7 @@ def _get_best_groq_model(client):
                 return m
     except Exception:
         pass
-    return "openai/gpt-oss-120b"
+    return "llama-3.3-70b-versatile"
 
 
 def _get_llm_client():
@@ -99,9 +98,9 @@ def detect_clips_from_transcript(
             formatted_transcript_lines.append(f"[{st:.1f}s - {et:.1f}s] {txt}")
 
     transcript_text = "\n".join(formatted_transcript_lines)
-    # Truncate if extremely large to stay within safe prompt boundaries
-    if len(transcript_text) > 40000:
-        transcript_text = transcript_text[:40000] + "\n...[transcript truncated]"
+    # Truncate if extremely large to stay within safe prompt boundaries (85k chars fits safely in LLaMA 3.3 128k context)
+    if len(transcript_text) > 85000:
+        transcript_text = transcript_text[:85000] + "\n...[transcript truncated]"
 
     prompt = f"""You are a master YouTube Shorts viral strategist and video editor.
 Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
