@@ -79,7 +79,7 @@ FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))
 
 # --- Audio & Pacing Optimization ---
 ENABLE_SILENCE_REMOVAL = os.environ.get("ENABLE_SILENCE_REMOVAL", "true").lower() == "true"
-SILENCE_THRESHOLD_SECONDS = float(os.environ.get("SILENCE_THRESHOLD_SECONDS", "0.5"))
+SILENCE_THRESHOLD_SECONDS = float(os.environ.get("SILENCE_THRESHOLD_SECONDS", "0.7"))
 SILENCE_PADDING_SECONDS = float(os.environ.get("SILENCE_PADDING_SECONDS", "0.12"))
 ENABLE_LOUDNORM = os.environ.get("ENABLE_LOUDNORM", "true").lower() == "true"
 LOUDNORM_TARGET_I = float(os.environ.get("LOUDNORM_TARGET_I", "-14.0"))

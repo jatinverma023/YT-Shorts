@@ -76,8 +76,8 @@ def extract_clip_segment(source_path: str, start_time: float, end_time: float, o
 
 def trim_silences_from_words(input_path: str, words: list, output_path: str, max_duration=None):
     """
-    Identifies dead air gaps (> SILENCE_THRESHOLD_SECONDS) from Whisper word timestamps,
-    trims them from the video/audio, and returns (tightened_video_path, shifted_words).
+    Detects and selectively compresses/removes excessive pauses using Whisper word boundaries
+    while preserving natural conversational pauses.
     """
     if not words or not ENABLE_SILENCE_REMOVAL:
         return input_path, words
@@ -86,42 +86,79 @@ def trim_silences_from_words(input_path: str, words: list, output_path: str, max
     if max_duration:
         total_duration = min(total_duration, max_duration)
 
-    # Build keep intervals
-    keep_intervals = []
-    pad = SILENCE_PADDING_SECONDS
-
-    # Initial start
-    first_word_start = max(0.0, words[0]["start"] - pad)
-    current_seg_start = first_word_start
-    current_seg_end = words[0]["end"] + pad
+    pad = SILENCE_PADDING_SECONDS  # e.g. 0.12s
+    keep_threshold = SILENCE_THRESHOLD_SECONDS  # default 0.70s: pauses <= this are preserved
+    long_threshold = 1.20  # excessive dead-air threshold
 
     cuts = []  # list of (cut_start, cut_end)
 
+    # Internal inter-word pause analysis & boundary-aware compression
     for i in range(len(words) - 1):
         w_curr = words[i]
         w_next = words[i + 1]
 
-        gap = w_next["start"] - w_curr["end"]
-        if gap > SILENCE_THRESHOLD_SECONDS:
-            # End current segment
-            cut_start = w_curr["end"] + pad
-            cut_end = max(cut_start, w_next["start"] - pad)
-            if cut_end > cut_start + 0.1:
-                keep_intervals.append((current_seg_start, cut_start))
+        w_curr_end = float(w_curr["end"])
+        w_next_start = float(w_next["start"])
+
+        # Timestamp safety: ensure gap is measured between valid forward-progressing boundaries
+        if w_next_start <= w_curr_end:
+            continue
+
+        gap = w_next_start - w_curr_end
+
+        # Tier 1: Very short (<0.35s) or normal conversational pause (<0.70s)
+        # KEEP: Preserve natural breathing, dramatic/emotional timing, thinking pauses
+        if gap <= keep_threshold:
+            continue
+
+        # Tier 2: Moderate dead-air (0.70s - 1.20s)
+        # COMPRESS: Do not hard-cut to zero! Leave a natural ~0.28s conversational pause
+        elif gap <= long_threshold:
+            pad_start = max(pad, 0.14)
+            pad_end = max(pad, 0.14)
+            cut_start = w_curr_end + pad_start
+            cut_end = w_next_start - pad_end
+            if cut_end - cut_start >= 0.15:
                 cuts.append((cut_start, cut_end))
-                current_seg_start = cut_end
-        current_seg_end = min(total_duration, w_next["end"] + pad)
 
-    keep_intervals.append((current_seg_start, min(total_duration, current_seg_end)))
+        # Tier 3: Long dead-air (> 1.20s)
+        # REMOVE / STRONGLY COMPRESS: Cut excessive dead air, leaving a clean ~0.20s breath
+        else:
+            pad_start = min(pad, 0.10)
+            pad_end = min(pad, 0.10)
+            cut_start = w_curr_end + pad_start
+            cut_end = w_next_start - pad_end
+            if cut_end - cut_start >= 0.15:
+                cuts.append((cut_start, cut_end))
 
-    # If no significant silences found to cut
-    if not cuts or len(keep_intervals) <= 1:
-        log.info("No dead air gaps > %.2fs found. Skipping silence cut.", SILENCE_THRESHOLD_SECONDS)
+    # If no excessive internal dead-air pauses were identified to cut
+    if not cuts:
+        log.info("No dead air gaps > %.2fs found. Preserving natural conversational pauses.", keep_threshold)
         return input_path, words
 
-    log.info("Cutting %d silence gaps to tighten pacing. Total keep segments: %d", len(cuts), len(keep_intervals))
 
-    # Build ffmpeg filter to extract and concat keep intervals
+    # 4. Build contiguous keep intervals from cuts
+    keep_intervals = []
+    current_pos = 0.0
+
+    for (c_start, c_end) in cuts:
+        if c_start > current_pos + 0.05:
+            keep_intervals.append((current_pos, c_start))
+        current_pos = c_end
+
+    if current_pos < total_duration - 0.05:
+        keep_intervals.append((current_pos, total_duration))
+
+    if len(keep_intervals) <= 1 and not (cuts and keep_intervals):
+        log.info("No valid keep segments constructed. Skipping silence cut.")
+        return input_path, words
+
+    log.info(
+        "Boundary-aware pause compression: cutting %d excessive gap(s) while preserving natural conversational pauses. Keep segments: %d",
+        len(cuts), len(keep_intervals)
+    )
+
+    # 5. Build FFmpeg filter complex to extract and concatenate keep intervals synchronously
     filter_parts = []
     concat_inputs = []
     for idx, (s, e) in enumerate(keep_intervals):
@@ -148,12 +185,12 @@ def trim_silences_from_words(input_path: str, words: list, output_path: str, max
         log.error("FFmpeg silence trimming failed with stderr:\n%s", e.stderr)
         return input_path, words
 
-    # Shift word timestamps so subtitles remain 100% in sync with the tightened cut
+    # 6. Shift word timestamps so subtitles remain 100% in sync with the tightened cut
     shifted_words = []
     for w in words:
-        orig_start = w["start"]
-        orig_end = w["end"]
-        # Subtract all cuts that happened before this word
+        orig_start = float(w["start"])
+        orig_end = float(w["end"])
+
         sub_start = 0.0
         sub_end = 0.0
         for (c_start, c_end) in cuts:
@@ -170,11 +207,12 @@ def trim_silences_from_words(input_path: str, words: list, output_path: str, max
 
         shifted_words.append({
             "word": w["word"],
-            "start": max(0.0, orig_start - sub_start),
-            "end": max(0.05, orig_end - sub_end),
+            "start": max(0.0, round(orig_start - sub_start, 3)),
+            "end": max(0.05, round(orig_end - sub_end, 3)),
         })
 
-    log.info("Tightened video from %.1fs to %.1fs.", total_duration, get_duration_seconds(output_path))
+    actual_out_dur = get_duration_seconds(output_path)
+    log.info("Tightened video from %.2fs to %.2fs (removed %.2fs of dead air).", total_duration, actual_out_dur, total_duration - actual_out_dur)
     return output_path, shifted_words
 
 
