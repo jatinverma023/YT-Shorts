@@ -44,7 +44,7 @@ CAPTION_OUTLINE_COLOR = os.environ.get("CAPTION_OUTLINE_COLOR", "&H00000000&")  
 WORDS_PER_PHRASE = int(os.environ.get("WORDS_PER_PHRASE", "4"))
 
 # --- Motion / Zoom (Parallax Depth) ---
-ENABLE_ZOOM = os.environ.get("ENABLE_ZOOM", "true").lower() == "true"
+ENABLE_ZOOM = os.environ.get("ENABLE_ZOOM", "false").lower() == "true"
 BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))
 FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))
 
