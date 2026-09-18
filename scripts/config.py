@@ -63,6 +63,15 @@ CAPTION_BASE_COLOR = os.environ.get("CAPTION_BASE_COLOR", "&H00FFFFFF&")        
 CAPTION_OUTLINE_COLOR = os.environ.get("CAPTION_OUTLINE_COLOR", "&H00000000&")      # Black
 WORDS_PER_PHRASE = int(os.environ.get("WORDS_PER_PHRASE", "4"))
 
+# --- Top Punchline / Hook Header styling (e.g. 'Khan Sir with Raj Shamani 🥰') ---
+ENABLE_TOP_PUNCHLINE = os.environ.get("ENABLE_TOP_PUNCHLINE", "true").lower() == "true"
+PUNCHLINE_FONT = os.environ.get("PUNCHLINE_FONT", SUBTITLE_FONT)
+PUNCHLINE_FONT_SIZE = int(os.environ.get("PUNCHLINE_FONT_SIZE", "52"))
+PUNCHLINE_MARGIN_TOP = int(os.environ.get("PUNCHLINE_MARGIN_TOP", "280"))  # Vertical distance from top of 1920 canvas
+PUNCHLINE_COLOR = os.environ.get("PUNCHLINE_COLOR", "&H00FFFFFF&")         # Crisp white text
+PUNCHLINE_OUTLINE_COLOR = os.environ.get("PUNCHLINE_OUTLINE_COLOR", "&H00000000&")  # Solid dark outline
+
+
 # --- Motion / Zoom (Parallax Depth) ---
 ENABLE_ZOOM = os.environ.get("ENABLE_ZOOM", "false").lower() == "true"
 BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))

@@ -27,6 +27,7 @@ QUEUE_HEADERS = [
     "error",
     "created_at",
     "updated_at",
+    "punchline",
 ]
 
 
@@ -59,14 +60,14 @@ def ensure_clip_queue_sheet(service=None):
         # Check if headers exist
         header_resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
-            range=f"{CLIP_QUEUE_TAB}!A1:K1",
+            range=f"{CLIP_QUEUE_TAB}!A1:L1",
         ).execute()
         rows = header_resp.get("values", [])
         if not rows or not rows[0]:
             log.info("Adding headers to '%s' tab...", CLIP_QUEUE_TAB)
             service.spreadsheets().values().update(
                 spreadsheetId=LOG_SHEET_ID,
-                range=f"{CLIP_QUEUE_TAB}!A1:K1",
+                range=f"{CLIP_QUEUE_TAB}!A1:L1",
                 valueInputOption="RAW",
                 body={"values": [QUEUE_HEADERS]},
             ).execute()
@@ -93,6 +94,7 @@ def enqueue_clips(drive_file_id: str, video_name: str, clips: list, service=None
             "",  # error
             now,  # created_at
             now,  # updated_at
+            str(clip.get("punchline", "")),
         ])
 
     if not rows:
@@ -100,7 +102,7 @@ def enqueue_clips(drive_file_id: str, video_name: str, clips: list, service=None
 
     service.spreadsheets().values().append(
         spreadsheetId=LOG_SHEET_ID,
-        range=f"{CLIP_QUEUE_TAB}!A:K",
+        range=f"{CLIP_QUEUE_TAB}!A:L",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
@@ -117,7 +119,7 @@ def get_next_pending_clip(service=None):
     try:
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
-            range=f"{CLIP_QUEUE_TAB}!A:K",
+            range=f"{CLIP_QUEUE_TAB}!A:L",
         ).execute()
     except Exception as e:
         log.warning("Failed to fetch clip queue from sheet: %s", e)
@@ -128,8 +130,8 @@ def get_next_pending_clip(service=None):
         return None
 
     for idx, row in enumerate(rows[1:], start=2):  # Row 1 is header, 1-indexed for Sheets
-        # Pad row to at least 11 columns
-        padded = row + [""] * (11 - len(row))
+        # Pad row to at least 12 columns for backwards compatibility
+        padded = row + [""] * (12 - len(row))
         status = padded[6].strip().lower()
 
         if status == "pending":
@@ -144,6 +146,7 @@ def get_next_pending_clip(service=None):
                     "status": "pending",
                     "youtube_url": padded[7],
                     "error": padded[8],
+                    "punchline": padded[11].strip() if len(padded) > 11 else "",
                 }
                 return idx, clip_data
             except (ValueError, IndexError) as err:

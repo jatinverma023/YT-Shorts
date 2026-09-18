@@ -118,15 +118,7 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
             slice_path, words, tightened_path
         )
 
-        # 5. Generate animated, pop/karaoke word-level ASS captions
-        ass_path = os.path.join(run_dir, "captions.ass")
-        transcribe.generate_ass_captions(shifted_words, ass_path)
-
-        # 6. Render final vertical Short with even-pixel scaling, loudnorm, and burned captions
-        out_path = os.path.join(run_dir, f"{base_name}_clip{clip_index}_short.mp4")
-        video_process.process_video(active_video, out_path, ass_path=ass_path)
-
-        # 7. Generate 3 ranked title variants, description, and tags grounded in this clip's transcript
+        # 5. Generate metadata & determine punchline hook grounded in this clip's transcript
         meta = metadata_ai.generate_shorts_metadata(
             f"{base_name} Part {clip_index}",
             transcript=clip_transcript,
@@ -135,6 +127,21 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
         variants = meta.get("title_variants", [title, title, title])
         description = meta["description"]
         tags = meta["tags"]
+        punchline = clip.get("punchline") or meta.get("punchline") or clip.get("hook_summary", "")
+
+        # 6. Generate animated, pop/karaoke word-level ASS captions with top punchline hook
+        clip_duration = video_process.get_duration_seconds(active_video)
+        ass_path = os.path.join(run_dir, "captions.ass")
+        transcribe.generate_ass_captions(
+            shifted_words,
+            ass_path,
+            punchline=punchline,
+            total_duration=clip_duration,
+        )
+
+        # 7. Render final vertical Short with even-pixel scaling, loudnorm, top punchline, and burned captions
+        out_path = os.path.join(run_dir, f"{base_name}_clip{clip_index}_short.mp4")
+        video_process.process_video(active_video, out_path, ass_path=ass_path)
 
         # 8. Upload to YouTube Shorts
         youtube_url = youtube_upload.upload_short(out_path, title, description, tags=tags)
@@ -146,7 +153,7 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
             title_1=variants[0], title_2=variants[1], title_3=variants[2],
         )
         notify.send(
-            f"✅ Uploaded Short ({video_name} Clip #{clip_index}):\n{title}\n{youtube_url}"
+            f"✅ Uploaded Short ({video_name} Clip #{clip_index}):\n{title}\n💬 Hook: {punchline}\n{youtube_url}"
         )
 
         # 10. Check if all clips for this video are finished -> Move source to Processed
@@ -304,12 +311,15 @@ def run_dry_run_inspection(drive_service=None, target_video_path: str = None):
             title = meta["title"]
             variants = meta.get("title_variants", [title, title, title])
 
+            punchline = clip.get("punchline") or meta.get("punchline", "")
+
             clip_report = {
                 "clip_index": idx,
                 "start_time": st,
                 "end_time": et,
                 "duration": round(et - st, 2),
                 "hook_summary": clip.get("hook_summary", ""),
+                "punchline": punchline,
                 "primary_title": title,
                 "title_variants": variants,
                 "description": meta.get("description", ""),
@@ -320,12 +330,13 @@ def run_dry_run_inspection(drive_service=None, target_video_path: str = None):
 
             print(f"\n--------------------------------------------------------------------------------")
             print(f"🎬 CLIP #{idx} [{st:.1f}s - {et:.1f}s] (Duration: {et - st:.1f}s)")
-            print(f"  Hook Summary: {clip_report['hook_summary']}")
-            print(f"  Primary Title: {title}")
-            print(f"  Variant 2:     {variants[1] if len(variants) > 1 else ''}")
-            print(f"  Variant 3:     {variants[2] if len(variants) > 2 else ''}")
-            print(f"  Transcript:    \"{clip_report['transcript_preview']}\"")
-            print(f"  Tags:          {', '.join(clip_report['tags'][:5])}")
+            print(f"  Punchline Hook: {punchline}")
+            print(f"  Hook Summary:   {clip_report['hook_summary']}")
+            print(f"  Primary Title:  {title}")
+            print(f"  Variant 2:      {variants[1] if len(variants) > 1 else ''}")
+            print(f"  Variant 3:      {variants[2] if len(variants) > 2 else ''}")
+            print(f"  Transcript:     \"{clip_report['transcript_preview']}\"")
+            print(f"  Tags:           {', '.join(clip_report['tags'][:5])}")
             print(f"--------------------------------------------------------------------------------")
 
         print(f"\n================================================================================")

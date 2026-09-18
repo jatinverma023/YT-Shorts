@@ -11,6 +11,8 @@ from config import (
     OPENAI_API_KEY, GROQ_API_KEY, TARGET_WIDTH, TARGET_HEIGHT,
     SUBTITLE_FONT, SUBTITLE_FONT_SIZE, CAPTION_HIGHLIGHT_COLOR,
     CAPTION_BASE_COLOR, CAPTION_OUTLINE_COLOR, WORDS_PER_PHRASE,
+    ENABLE_TOP_PUNCHLINE, PUNCHLINE_FONT, PUNCHLINE_FONT_SIZE,
+    PUNCHLINE_MARGIN_TOP, PUNCHLINE_COLOR, PUNCHLINE_OUTLINE_COLOR,
 )
 
 log = logging.getLogger("transcribe")
@@ -131,10 +133,18 @@ def transcribe_audio(audio_path):
     }
 
 
-def generate_ass_captions(words, ass_path, target_width=TARGET_WIDTH, target_height=TARGET_HEIGHT):
+def generate_ass_captions(
+    words,
+    ass_path,
+    target_width=TARGET_WIDTH,
+    target_height=TARGET_HEIGHT,
+    punchline: str = None,
+    total_duration: float = None,
+):
     """
-    Generates an ASS subtitle file with animated, pop/karaoke word-level highlights.
-    Displays words in short phrases (WORDS_PER_PHRASE), with the active word popped & highlighted.
+    Generates an ASS subtitle file with:
+    - Top punchline hook header (Alignment: 8 = Top Center) matching viral Shorts design
+    - Animated, pop/karaoke word-level highlights in lower third (Alignment: 2 = Bottom Center).
     """
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -145,17 +155,36 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONT_SIZE},{CAPTION_BASE_COLOR},&H000000FF,{CAPTION_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,2,40,40,260,1
+Style: HeaderPunchline,{PUNCHLINE_FONT},{PUNCHLINE_FONT_SIZE},{PUNCHLINE_COLOR},&H000000FF,{PUNCHLINE_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,8,50,50,{PUNCHLINE_MARGIN_TOP},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+    dialogue_lines = []
+
+    # Calculate overall duration for top punchline header
+    if total_duration and total_duration > 0:
+        p_end = float(total_duration)
+    elif words:
+        p_end = max((float(w.get("end", 0.0)) for w in words), default=59.0) + 1.0
+    else:
+        p_end = 59.0
+
+    # Add top punchline event if enabled and provided
+    if ENABLE_TOP_PUNCHLINE and punchline:
+        clean_punchline = str(punchline).strip().replace("{", "").replace("}", "")
+        if clean_punchline:
+            p_start_str = _format_ass_time(0.0)
+            p_end_str = _format_ass_time(p_end)
+            dialogue_lines.append(
+                f"Dialogue: 1,{p_start_str},{p_end_str},HeaderPunchline,,0,0,0,,{clean_punchline}"
+            )
+
     if not words:
         with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(header)
+            f.write(header + "\n".join(dialogue_lines) + "\n")
         return ass_path
-
-    dialogue_lines = []
 
     # Chunk words into small phrases (e.g. 3-4 words)
     phrase_size = max(2, WORDS_PER_PHRASE)
@@ -199,7 +228,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header + "\n".join(dialogue_lines) + "\n")
 
-    log.info("Generated animated ASS captions at %s with %d events", ass_path, len(dialogue_lines))
+    log.info("Generated animated ASS captions at %s with %d events (punchline: %s)", ass_path, len(dialogue_lines), punchline)
     return ass_path
 
 

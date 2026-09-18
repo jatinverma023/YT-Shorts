@@ -81,6 +81,7 @@ def detect_clips_from_transcript(
             "duration": round(total_duration, 2),
             "hook_summary": "Full video clip",
             "title_idea": "Key Highlight #shorts",
+            "punchline": "Watch Till The End 🔥",
         }]
 
     client, model = _get_llm_client()
@@ -125,7 +126,8 @@ Respond ONLY with valid JSON in this exact structure:
       "start_time": 12.5,
       "end_time": 54.0,
       "hook_summary": "Explains why morning screen time ruins focus and what to do instead.",
-      "title_idea": "The Morning Habit Destroying Your Brain #shorts"
+      "title_idea": "The Morning Habit Destroying Your Brain #shorts",
+      "punchline": "Stop Ruining Your Mornings 🛑"
     }}
   ]
 }}
@@ -193,6 +195,10 @@ def _validate_and_filter_clips(
             end = float(item.get("end_time", 0.0))
             summary = str(item.get("hook_summary", "")).strip() or "Key moment from video"
             title = str(item.get("title_idea", "")).strip() or "Must Watch Insight #shorts"
+            punchline = str(item.get("punchline", "")).strip().strip('"').strip("'").replace("{", "").replace("}", "")[:60]
+            if not punchline:
+                clean_t = re.sub(r"#shorts", "", title, flags=re.IGNORECASE).strip()
+                punchline = f"{clean_t[:45]} ✨" if clean_t else "Watch Till The End 🔥"
         except (ValueError, TypeError):
             continue
 
@@ -222,6 +228,7 @@ def _validate_and_filter_clips(
             "duration": round(duration, 2),
             "hook_summary": summary,
             "title_idea": title,
+            "punchline": punchline,
         }
 
         # Check overlap and semantic duplication with already accepted clips
@@ -270,6 +277,7 @@ def _fallback_clips(
             "duration": round(curr_end - curr_start, 2),
             "hook_summary": f"Highlight segment starting at {int(curr_start)}s",
             "title_idea": f"Key Highlight Part {len(clips) + 1} #shorts",
+            "punchline": "Watch Till The End 🔥",
         })
         curr_start = curr_end
 
@@ -280,6 +288,7 @@ def _fallback_clips(
             "duration": round(min(total_duration, float(max_clip_seconds)), 2),
             "hook_summary": "Highlight segment",
             "title_idea": "Key Highlight #shorts",
+            "punchline": "Watch Till The End 🔥",
         })
 
     return clips

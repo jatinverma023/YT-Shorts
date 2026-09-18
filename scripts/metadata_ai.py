@@ -44,6 +44,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
         return {
             "title": t1,
             "title_variants": [t1, f"Secret to {fallback[:60]} #shorts", f"Watch this: {fallback[:60]} #shorts"],
+            "punchline": f"{fallback[:45]} ✨",
             "description": f"{fallback}\n\n#shorts #podcast #viral",
             "tags": ["shorts", "podcast", "viral", "clips"],
         }
@@ -79,14 +80,18 @@ Requirements:
    - Variant 2 (Curiosity/Question): A curiosity-driven question or insight reflecting the conversation.
    - Variant 3 (Actionable/Takeaway): A direct, high-value takeaway or quote.
    Each title MUST be under 80 characters (maximum 90 chars total) and end with "#shorts".
-2. Description / Caption: 2-3 engaging sentences summarizing the clip's authentic insight, followed by 4-6 relevant hashtags.
-3. Tags: 5-8 relevant search keyword tags.
+2. Punchline / Top Hook Header:
+   - A single, highly engaging, interactive 1-line hook or punchline (4 to 8 words) from or about this clip to display prominently at the top of the video (e.g. "Khan Sir with Raj Shamani 🥰", "Khan Sir's Advice for Youth 🔥", "Wait for the Reality Check 🤯", or a key punchline dialogue from the clip).
+   - Must be punchy, attention-grabbing, easy to read in 2 seconds, and authentically reflect the clip. Can include 1 fitting emoji.
+3. Description / Caption: 2-3 engaging sentences summarizing the clip's authentic insight, followed by 4-6 relevant hashtags.
+4. Tags: 5-8 relevant search keyword tags.
 
 Respond ONLY with valid JSON in this exact structure:
 {{
   "title_1": "...",
   "title_2": "...",
   "title_3": "...",
+  "punchline": "...",
   "description": "...",
   "tags": ["...", "..."]
 }}
@@ -117,16 +122,20 @@ Respond ONLY with valid JSON in this exact structure:
         title_2 = sanitize_title(data.get("title_2"), f"Insight: {fb}")
         title_3 = sanitize_title(data.get("title_3"), f"Must Watch: {fb}")
 
+        raw_punchline = str(data.get("punchline", "")).strip().strip('"').strip("'")
+        raw_punchline = raw_punchline.replace("{", "").replace("}", "")
+        punchline = raw_punchline[:60] if raw_punchline else f"{fb[:45]} ✨"
+
         description = str(data.get("description", "")).strip()
         tags = list(data.get("tags", ["shorts", "podcast", "viral"]))
 
         log.info("AI Generated Title 1 (Primary): %s", title_1)
-        log.info("AI Generated Title 2: %s", title_2)
-        log.info("AI Generated Title 3: %s", title_3)
+        log.info("AI Generated Punchline Header: %s", punchline)
 
         return {
             "title": title_1,
             "title_variants": [title_1, title_2, title_3],
+            "punchline": punchline,
             "description": description,
             "tags": tags,
         }
@@ -137,6 +146,14 @@ Respond ONLY with valid JSON in this exact structure:
         return {
             "title": t1,
             "title_variants": [t1, f"Secret to {fb[:60]} #shorts", f"Watch this: {fb[:60]} #shorts"],
+            "punchline": f"{fb[:45]} ✨",
             "description": f"{fb}\n\n#shorts #podcast #viral",
             "tags": ["shorts", "podcast", "viral"],
         }
+
+
+def generate_punchline(filename: str, transcript: str = "", hook_summary: str = "") -> str:
+    """Convenience helper to extract or generate a punchline hook for a clip."""
+    meta = generate_shorts_metadata(filename, transcript=transcript)
+    return meta.get("punchline") or hook_summary or clean_filename_fallback(filename)
+
