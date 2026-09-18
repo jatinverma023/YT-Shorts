@@ -88,7 +88,8 @@ Requirements:
 2. Each clip MUST start with a compelling hook or question and deliver a self-contained takeaway, insight, punchline, or story.
 3. Clips MUST NOT overlap in time (start_time of one clip cannot fall inside another clip).
 4. All start_time and end_time values MUST be within 0.0 and {total_duration:.1f} seconds.
-5. Rank your choices in order of predicted viewer retention and viral potential.
+5. SEMANTIC DIVERSITY: Each clip MUST explore a distinct topic, concept, story, or moment from the video. Do NOT select multiple clips that make the same core point or reiterate the same takeaway.
+6. Rank your choices in order of predicted viewer retention and viral potential.
 
 Transcript:
 {transcript_text}
@@ -130,6 +131,28 @@ Respond ONLY with valid JSON in this exact structure:
     return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips)
 
 
+def _is_similar_summary(summary1: str, summary2: str, threshold: float = 0.3) -> bool:
+    """
+    Checks semantic word overlap between two hook summaries to prevent picking
+    multiple clips that make the same core point.
+    Uses overlap coefficient and Jaccard index on key content words.
+    """
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with",
+        "about", "why", "how", "what", "is", "it", "this", "that", "of", "from",
+        "explains", "details", "shows", "discusses", "talks", "reveals", "key", "moment",
+    }
+    words1 = set(re.findall(r"\w+", summary1.lower())) - stop_words
+    words2 = set(re.findall(r"\w+", summary2.lower())) - stop_words
+    if not words1 or not words2:
+        return False
+    intersection = words1.intersection(words2)
+    # Overlap coefficient: ratio of shared words to the smaller set
+    overlap_coef = len(intersection) / min(len(words1), len(words2))
+    jaccard = len(intersection) / len(words1.union(words2))
+    return overlap_coef >= 0.4 or jaccard >= threshold
+
+
 def _validate_and_filter_clips(
     raw_clips: list,
     total_duration: float,
@@ -137,7 +160,7 @@ def _validate_and_filter_clips(
     max_clip_seconds: int,
     max_clips: int,
 ) -> list:
-    """Validates bounds, resolves overlaps, and sorts clips."""
+    """Validates bounds, resolves overlaps, deduplicates topics, and sorts clips."""
     accepted = []
 
     for item in raw_clips:
@@ -177,15 +200,23 @@ def _validate_and_filter_clips(
             "title_idea": title,
         }
 
-        # Check overlap with already accepted clips
-        has_overlap = False
+        # Check overlap and semantic duplication with already accepted clips
+        has_conflict = False
         for acc in accepted:
-            # Two ranges [s1, e1] and [s2, e2] overlap if max(s1, s2) < min(e1, e2)
+            # 1. Temporal overlap: max(s1, s2) < min(e1, e2)
             if max(candidate["start_time"], acc["start_time"]) < min(candidate["end_time"], acc["end_time"]):
-                has_overlap = True
+                has_conflict = True
+                break
+            # 2. Semantic duplication check: avoid picking multiple clips making the same point
+            if _is_similar_summary(candidate["hook_summary"], acc["hook_summary"]):
+                log.info(
+                    "Discarding clip [%.1fs - %.1fs] as semantically redundant with [%.1fs - %.1fs]: '%s'",
+                    candidate["start_time"], candidate["end_time"], acc["start_time"], acc["end_time"], candidate["hook_summary"],
+                )
+                has_conflict = True
                 break
 
-        if not has_overlap:
+        if not has_conflict:
             accepted.append(candidate)
 
         if len(accepted) >= max_clips:

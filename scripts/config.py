@@ -72,4 +72,10 @@ DEFAULT_TAGS = ["shorts", "podcast", "clips"]
 DEFAULT_CATEGORY_ID = "24"      # "Entertainment" — change if needed
 UPLOAD_AS_PRIVATE_FIRST = False  # set True if you want to review before public
 
+# --- Verification / Debug Mode ---
+# When true, runs clip detection and metadata generation and logs the full plan
+# without rendering video, uploading to YouTube, or consuming quota.
+DRY_RUN_LOG_ONLY = os.environ.get("DRY_RUN_LOG_ONLY", "false").strip().lower() == "true"
+
 WORKDIR = os.environ.get("WORKDIR", "/tmp/shorts_pipeline")
+

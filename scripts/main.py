@@ -11,10 +11,11 @@ Fully unattended — survives ephemeral GitHub Actions runners without local sta
 import logging
 import os
 import shutil
+import sys
 
 from config import (
     WORKDIR, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID,
-    DRIVE_FAILED_FOLDER_ID,
+    DRIVE_FAILED_FOLDER_ID, DRY_RUN_LOG_ONLY,
 )
 import drive_utils
 import transcribe
@@ -238,8 +239,112 @@ def discover_and_enqueue_video(drive_service, file_info: dict):
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def run_dry_run_inspection(drive_service=None, target_video_path: str = None):
+    """
+    Lightweight verification/debug mode (DRY_RUN_LOG_ONLY=true or --dry-run).
+    Runs clip detection and metadata generation for a video without rendering video,
+    without uploading to YouTube, without consuming quota, and without modifying Drive/Sheets.
+    """
+    log.info("================================================================================")
+    log.info("🔍 DRY-RUN INSPECTION MODE ACTIVE (DRY_RUN_LOG_ONLY=True)")
+    log.info("No video rendering, no YouTube uploads, and no quota will be consumed.")
+    log.info("================================================================================")
+
+    src_path = target_video_path
+    cleanup_temp = False
+
+    if not src_path:
+        for arg in sys.argv[1:]:
+            if arg != "--dry-run" and not arg.startswith("-") and os.path.isfile(arg):
+                src_path = arg
+                break
+
+    if not src_path:
+        drive_service = drive_service or drive_utils.get_drive_service()
+        incoming = drive_utils.list_new_videos(drive_service)
+        if not incoming:
+            log.info("Dry-run: No videos found in Google Drive Incoming folder.")
+            return []
+        target = incoming[0]
+        src_path = os.path.join(WORKDIR, f"dryrun_{target['name']}")
+        os.makedirs(WORKDIR, exist_ok=True)
+        log.info("Dry-run: Downloading incoming video '%s' (ID: %s)...", target["name"], target["id"])
+        drive_utils.download_file(drive_service, target["id"], src_path)
+        cleanup_temp = True
+
+    try:
+        video_name = os.path.basename(src_path)
+        base_name = os.path.splitext(video_name)[0]
+        total_duration = video_process.get_duration_seconds(src_path)
+        log.info("Analyzing video '%s' (Duration: %.1fs / %d min)", video_name, total_duration, int(total_duration / 60))
+
+        # 1. Extract audio & transcribe
+        temp_audio = os.path.join(WORKDIR, f"dryrun_audio_{base_name}.mp3")
+        transcribe.extract_audio(src_path, temp_audio)
+        trans_res = transcribe.transcribe_audio(temp_audio)
+        segments = trans_res.get("segments", [])
+        words = trans_res.get("words", [])
+
+        # 2. Detect clips
+        clips = clip_detection.detect_clips_from_transcript(segments, total_duration)
+        log.info("Detected %d candidate clip(s) for '%s':", len(clips), video_name)
+
+        report = []
+        # 3. Generate metadata for each clip slice
+        for idx, clip in enumerate(clips, start=1):
+            st = clip["start_time"]
+            et = clip["end_time"]
+            clip_words = [w["word"] for w in words if w.get("start", 0.0) >= st and w.get("end", 0.0) <= et]
+            clip_text = " ".join(clip_words) if clip_words else clip.get("hook_summary", "")
+
+            meta = metadata_ai.generate_shorts_metadata(
+                f"{base_name} Part {idx}",
+                transcript=clip_text,
+            )
+            title = meta["title"]
+            variants = meta.get("title_variants", [title, title, title])
+
+            clip_report = {
+                "clip_index": idx,
+                "start_time": st,
+                "end_time": et,
+                "duration": round(et - st, 2),
+                "hook_summary": clip.get("hook_summary", ""),
+                "primary_title": title,
+                "title_variants": variants,
+                "description": meta.get("description", ""),
+                "tags": meta.get("tags", []),
+                "transcript_preview": clip_text[:150] + ("..." if len(clip_text) > 150 else ""),
+            }
+            report.append(clip_report)
+
+            print(f"\n--------------------------------------------------------------------------------")
+            print(f"🎬 CLIP #{idx} [{st:.1f}s - {et:.1f}s] (Duration: {et - st:.1f}s)")
+            print(f"  Hook Summary: {clip_report['hook_summary']}")
+            print(f"  Primary Title: {title}")
+            print(f"  Variant 2:     {variants[1] if len(variants) > 1 else ''}")
+            print(f"  Variant 3:     {variants[2] if len(variants) > 2 else ''}")
+            print(f"  Transcript:    \"{clip_report['transcript_preview']}\"")
+            print(f"  Tags:          {', '.join(clip_report['tags'][:5])}")
+            print(f"--------------------------------------------------------------------------------")
+
+        print(f"\n================================================================================")
+        print(f"✅ DRY-RUN COMPLETE: {len(report)} clip(s) inspected. No quota used, no files uploaded.")
+        print(f"================================================================================\n")
+        return report
+
+    finally:
+        if cleanup_temp and os.path.exists(src_path):
+            os.remove(src_path)
+
+
 def main():
     os.makedirs(WORKDIR, exist_ok=True)
+
+    if DRY_RUN_LOG_ONLY or "--dry-run" in sys.argv:
+        run_dry_run_inspection()
+        return
+
     drive_service = drive_utils.get_drive_service()
     sheet_log.ensure_clip_queue_sheet()
 
