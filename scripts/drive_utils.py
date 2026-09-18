@@ -31,8 +31,9 @@ def get_drive_service():
 
 def list_new_videos(service, folder_id=DRIVE_INCOMING_FOLDER_ID):
     """Return list of {id, name, mimeType} for video files sitting in Incoming."""
+    clean_id = folder_id.strip()
     query = (
-        f"'{folder_id}' in parents "
+        f"'{clean_id}' in parents "
         "and trashed = false "
         "and (mimeType contains 'video/')"
     )
@@ -68,8 +69,8 @@ def move_file(service, file_id, from_folder_id, to_folder_id):
     """Move a file between folders (removes old parent, adds new one)."""
     service.files().update(
         fileId=file_id,
-        addParents=to_folder_id,
-        removeParents=from_folder_id,
+        addParents=to_folder_id.strip(),
+        removeParents=from_folder_id.strip(),
         fields="id, parents",
     ).execute()
     log.info("Moved file %s -> folder %s", file_id, to_folder_id)
