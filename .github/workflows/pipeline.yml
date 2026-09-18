@@ -8,7 +8,13 @@ on:
     - cron: "30 9 * * *"
     # 8:00 PM IST (14:30 UTC)
     - cron: "30 14 * * *"
-  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: "Test notification only (Telegram/Slack ping without video processing)"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   process-videos:
@@ -31,6 +37,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run pipeline
+        if: ${{ !inputs.test_notify }}
         working-directory: scripts
         env:
           DRIVE_INCOMING_FOLDER_ID: ${{ secrets.DRIVE_INCOMING_FOLDER_ID }}
@@ -47,3 +54,13 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python main.py
+
+      - name: Run test notification
+        if: ${{ inputs.test_notify }}
+        working-directory: scripts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python notify.py "🤖 Test notification from YouTube Shorts Automation pipeline: Telegram alerts are working properly! 🎉"
+
