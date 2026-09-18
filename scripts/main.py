@@ -31,16 +31,17 @@ log = logging.getLogger("main")
 
 def check_and_move_if_completed(drive_service, drive_file_id: str, video_name: str):
     """
-    Checks if all clips for this source video are finished (no pending clips remain).
+    Checks if all clips for this source video are finished (no pending or quota-waiting clips remain).
     If completed, moves the source video from Incoming to Processed in Google Drive.
     """
     counts = sheet_log.get_video_clip_counts(drive_file_id, service=None)
     log.info(
-        "Clip status for '%s' (ID: %s): Total: %d, Pending: %d, Done: %d, Failed: %d",
-        video_name, drive_file_id, counts["total"], counts["pending"], counts["done"], counts["failed"],
+        "Clip status for '%s' (ID: %s): Total: %d, Pending: %d, Done: %d, Failed: %d, QuotaWait: %d",
+        video_name, drive_file_id, counts["total"], counts["pending"], counts["done"], counts["failed"], counts.get("retry_after_quota_reset", 0),
     )
 
-    if counts["total"] > 0 and counts["pending"] == 0:
+    # Only move when ALL clips are settled (pending == 0 and retry_after_quota_reset == 0)
+    if counts["total"] > 0 and counts["pending"] == 0 and counts.get("retry_after_quota_reset", 0) == 0:
         if counts["done"] > 0:
             log.info("All clips completed for '%s'. Moving source video to Processed folder.", video_name)
             try:
@@ -69,7 +70,7 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
     4. Burns animated ASS captions
     5. Renders vertical Short with parallax zoom, loudnorm, and mobile enhancements
     6. Generates transcript-grounded title variants, description, and tags
-    7. Uploads to YouTube and updates queue status to 'done' (or 'failed')
+    7. Uploads to YouTube and updates queue status to 'done' (or 'failed' / 'retry_after_quota_reset')
     8. Moves source video to Processed if all its clips are done
     """
     drive_file_id = clip["drive_file_id"]
@@ -149,6 +150,24 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
 
         # 10. Check if all clips for this video are finished -> Move source to Processed
         check_and_move_if_completed(drive_service, drive_file_id, video_name)
+
+    except youtube_upload.YouTubeQuotaExceededError as qe:
+        log.warning("YouTube quota exceeded for clip #%s of %s: %s", clip_index, video_name, qe)
+        sheet_log.update_clip_status(
+            row_number,
+            "retry_after_quota_reset",
+            error="quota_exceeded — retry after quota reset",
+        )
+        sheet_log.log_run(
+            video_name,
+            f"QUOTA_EXCEEDED (Clip #{clip_index})",
+            error="quota_exceeded — retry after quota reset",
+        )
+        notify.send_quota_warning(
+            f"YouTube quota limit reached while uploading '{video_name}' (Clip #{clip_index}).\n"
+            f"Status set to 'retry_after_quota_reset'. The source video remains safely in Incoming."
+        )
+        # Explicitly DO NOT call check_and_move_if_completed! File must stay in Incoming.
 
     except Exception as e:
         log.exception("Failed processing clip #%s for %s", clip_index, video_name)
@@ -235,18 +254,30 @@ def main():
         process_queue_clip(drive_service, row_number, clip)
         return
 
-    # Step B: Queue is empty -> Check Drive "Incoming" for new videos
-    log.info("Queue is empty. Checking Drive 'Incoming' folder for new videos...")
+    # Step B: Check if any clip is waiting for quota reset
+    if sheet_log.has_active_video_in_queue():
+        log.info(
+            "Queue has active clip(s) waiting for quota reset ('retry_after_quota_reset'). "
+            "Skipping Incoming folder until current video is completely processed."
+        )
+        return
+
+    # Step C: Queue is empty -> Check Drive "Incoming" for new videos
+    log.info("Queue is completely empty. Checking Drive 'Incoming' folder for new videos...")
     incoming_videos = drive_utils.list_new_videos(drive_service)
     if not incoming_videos:
         log.info("No pending clips in queue and no new videos in Incoming folder. Run finished.")
         return
 
-    # Pick the next video (FIFO sequential ordering)
+    # Pick ONLY the single oldest video (FIFO sequential ordering)
     target_video = incoming_videos[0]
-    log.info("Found %d new video(s) in Incoming. Starting with: %s", len(incoming_videos), target_video["name"])
+    log.info(
+        "Found %d new video(s) in Incoming. Starting with the single oldest: '%s' (ID: %s)",
+        len(incoming_videos), target_video["name"], target_video["id"],
+    )
     discover_and_enqueue_video(drive_service, target_video)
 
 
 if __name__ == "__main__":
     main()
+

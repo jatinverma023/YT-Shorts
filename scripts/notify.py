@@ -23,3 +23,10 @@ def send(message: str):
 
     if not (TELEGRAM_BOT_TOKEN or SLACK_WEBHOOK_URL):
         log.info("No notification channel configured. Message was: %s", message)
+
+
+def send_quota_warning(message: str):
+    """Sends a distinct high-visibility notification for YouTube API quota exhaustion."""
+    prefix = "⚠️ [YOUTUBE QUOTA ALERT] ⚠️\n"
+    send(f"{prefix}{message}")
+

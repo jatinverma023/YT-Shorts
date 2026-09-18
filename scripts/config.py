@@ -5,6 +5,12 @@ you can use a .env file (never commit it).
 """
 import os
 
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 # --- Google Drive folder IDs (get these from the folder URL in Drive) ---
 DRIVE_INCOMING_FOLDER_ID = os.environ["DRIVE_INCOMING_FOLDER_ID"].strip()
 DRIVE_PROCESSED_FOLDER_ID = os.environ["DRIVE_PROCESSED_FOLDER_ID"].strip()

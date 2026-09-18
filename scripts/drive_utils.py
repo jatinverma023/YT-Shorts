@@ -42,7 +42,8 @@ def list_new_videos(service, folder_id=DRIVE_INCOMING_FOLDER_ID):
     while True:
         resp = service.files().list(
             q=query,
-            fields="nextPageToken, files(id, name, mimeType, size)",
+            orderBy="createdTime asc",
+            fields="nextPageToken, files(id, name, mimeType, size, createdTime)",
             pageToken=page_token,
         ).execute()
         results.extend(resp.get("files", []))

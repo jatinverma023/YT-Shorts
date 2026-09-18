@@ -167,10 +167,48 @@ def update_clip_status(row_number: int, status: str, youtube_url: str = "", erro
     log.info("Updated queue row %d -> status: %s", row_number, status)
 
 
-def get_video_clip_counts(drive_file_id: str, service=None) -> dict:
-    """Returns counts of total, pending, done, and failed clips for a given drive_file_id."""
+def get_clip_by_status(target_status: str, service=None):
+    """Finds the first clip in the durable queue with a specific status."""
     service = service or get_sheets_service()
-    counts = {"total": 0, "pending": 0, "done": 0, "failed": 0}
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!A:K",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue from sheet: %s", e)
+        return None
+
+    rows = resp.get("values", [])
+    if len(rows) <= 1:
+        return None
+
+    for idx, row in enumerate(rows[1:], start=2):
+        padded = row + [""] * (11 - len(row))
+        status = padded[6].strip().lower()
+        if status == target_status.lower():
+            try:
+                return idx, {
+                    "source_video_name": padded[0],
+                    "drive_file_id": padded[1],
+                    "clip_index": int(padded[2]) if padded[2] else 1,
+                    "start_time": float(padded[3]),
+                    "end_time": float(padded[4]),
+                    "hook_summary": padded[5],
+                    "status": status,
+                    "youtube_url": padded[7],
+                    "error": padded[8],
+                }
+            except (ValueError, IndexError) as err:
+                log.warning("Skipping malformed row %d: %s", idx, err)
+                continue
+    return None
+
+
+def get_video_clip_counts(drive_file_id: str, service=None) -> dict:
+    """Returns counts of total, pending, done, failed, and retry_after_quota_reset clips for a given drive_file_id."""
+    service = service or get_sheets_service()
+    counts = {"total": 0, "pending": 0, "done": 0, "failed": 0, "retry_after_quota_reset": 0}
     try:
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
@@ -193,8 +231,29 @@ def get_video_clip_counts(drive_file_id: str, service=None) -> dict:
             status = row[5].strip().lower() if len(row) > 5 else "pending"
             if status in counts:
                 counts[status] += 1
+            else:
+                counts["pending"] += 1
 
     return counts
+
+
+def has_active_video_in_queue(service=None) -> bool:
+    """Returns True if there is ANY clip in the queue with status 'pending' or 'retry_after_quota_reset'."""
+    service = service or get_sheets_service()
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!G:G",
+        ).execute()
+        rows = resp.get("values", [])
+        for row in rows[1:]:
+            if row:
+                st = row[0].strip().lower()
+                if st in ("pending", "retry_after_quota_reset"):
+                    return True
+    except Exception as e:
+        log.warning("Could not check active clips in queue: %s", e)
+    return False
 
 
 def log_run(filename, status, detected_lang="", youtube_url="", title_1="", title_2="", title_3="", error=""):

@@ -18,12 +18,41 @@ import google.oauth2.credentials
 import googleapiclient.discovery
 import googleapiclient.http
 
+from googleapiclient.errors import HttpError
 from config import (
     YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN,
     DEFAULT_TAGS, DEFAULT_CATEGORY_ID, UPLOAD_AS_PRIVATE_FIRST,
 )
 
 log = logging.getLogger("youtube_upload")
+
+
+class YouTubeQuotaExceededError(Exception):
+    """Raised specifically when YouTube Data API daily upload quota is exhausted."""
+    pass
+
+
+def is_quota_exceeded_error(error: Exception) -> bool:
+    """Detects if an HttpError corresponds to YouTube API quota exhaustion."""
+    if not isinstance(error, HttpError):
+        return False
+    status_code = getattr(error.resp, "status", None)
+    if status_code in (403, 429):
+        content = ""
+        try:
+            content = str(error.content.decode("utf-8") if isinstance(error.content, bytes) else error.content).lower()
+        except Exception:
+            content = str(error).lower()
+        quota_indicators = [
+            "quotaexceeded",
+            "dailylimitexceeded",
+            "userratelimitexceeded",
+            "ratelimitexceeded",
+            "exceeded your quota",
+            "quota",
+        ]
+        return any(ind in content for ind in quota_indicators)
+    return False
 
 
 def get_youtube_client():
@@ -65,10 +94,17 @@ def upload_short(video_path: str, title: str, description: str, tags=None):
     )
 
     response = None
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            log.info("Upload progress: %d%%", int(status.progress() * 100))
+    try:
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                log.info("Upload progress: %d%%", int(status.progress() * 100))
+    except HttpError as e:
+        if is_quota_exceeded_error(e):
+            log.error("YouTube Data API quota exceeded (status %s): %s", e.resp.status, e)
+            raise YouTubeQuotaExceededError("YouTube Data API quota exceeded (10,000 units/day limit reached).") from e
+        log.error("YouTube API HTTP error: %s", e)
+        raise
 
     video_id = response["id"]
     log.info("Uploaded. Video ID: %s", video_id)
