@@ -22,21 +22,24 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 
-def log_run(filename, status, detected_lang="", youtube_url="", error=""):
+def log_run(filename, status, detected_lang="", youtube_url="", title_1="", title_2="", title_3="", error=""):
     service = get_sheets_service()
     row = [[
         datetime.datetime.utcnow().isoformat(),
         filename,
         status,
         detected_lang,
+        title_1,
+        title_2,
+        title_3,
         youtube_url,
         error,
     ]]
     service.spreadsheets().values().append(
         spreadsheetId=LOG_SHEET_ID,
-        range=f"{LOG_SHEET_TAB}!A:F",
+        range=f"{LOG_SHEET_TAB}!A:I",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": row},
     ).execute()
-    log.info("Logged run for %s: %s", filename, status)
+    log.info("Logged run for %s: %s (Title: %s)", filename, status, title_1)

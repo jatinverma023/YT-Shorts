@@ -36,8 +36,24 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 MAX_SHORT_SECONDS = int(os.environ.get("MAX_SHORT_SECONDS", "59"))
-SUBTITLE_FONT = "Noto Sans Devanagari"
-SUBTITLE_FONT_SIZE = 20         # in libass "scale" terms, tuned in video_process.py
+SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", "Noto Sans Devanagari")
+SUBTITLE_FONT_SIZE = int(os.environ.get("SUBTITLE_FONT_SIZE", "52"))  # ASS 1080x1920 PlayRes scale
+CAPTION_HIGHLIGHT_COLOR = os.environ.get("CAPTION_HIGHLIGHT_COLOR", "&H0000FFFF&")  # Yellow in ASS hex
+CAPTION_BASE_COLOR = os.environ.get("CAPTION_BASE_COLOR", "&H00FFFFFF&")            # White
+CAPTION_OUTLINE_COLOR = os.environ.get("CAPTION_OUTLINE_COLOR", "&H00000000&")      # Black
+WORDS_PER_PHRASE = int(os.environ.get("WORDS_PER_PHRASE", "4"))
+
+# --- Motion / Zoom (Parallax Depth) ---
+ENABLE_ZOOM = os.environ.get("ENABLE_ZOOM", "true").lower() == "true"
+BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))
+FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))
+
+# --- Audio & Pacing Optimization ---
+ENABLE_SILENCE_REMOVAL = os.environ.get("ENABLE_SILENCE_REMOVAL", "true").lower() == "true"
+SILENCE_THRESHOLD_SECONDS = float(os.environ.get("SILENCE_THRESHOLD_SECONDS", "0.5"))
+SILENCE_PADDING_SECONDS = float(os.environ.get("SILENCE_PADDING_SECONDS", "0.12"))
+ENABLE_LOUDNORM = os.environ.get("ENABLE_LOUDNORM", "true").lower() == "true"
+LOUDNORM_TARGET_I = float(os.environ.get("LOUDNORM_TARGET_I", "-14.0"))
 
 # --- YouTube upload defaults ---
 DEFAULT_TAGS = ["shorts", "podcast", "clips"]

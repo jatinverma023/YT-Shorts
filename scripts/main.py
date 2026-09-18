@@ -51,20 +51,42 @@ def process_one(service, file_info):
                 name, duration, MAX_SHORT_SECONDS, MAX_SHORT_SECONDS,
             )
 
-        # Process and enhance video with cinematic filters (no subtitles)
-        video_process.process_video(src_path, out_path, max_seconds=clip_duration)
+        # 1. Extract audio & transcribe with word-level timestamps
+        log.info("Extracting audio and generating word-level transcription...")
+        transcribe.extract_audio(src_path, audio_path, max_seconds=clip_duration)
+        trans_res = transcribe.transcribe_audio(audio_path)
+        words = trans_res["words"]
+        detected_lang = trans_res["language"]
+        transcript_text = trans_res["text"]
 
-        # Generate clean, viral Title, Caption/Description, and Tags with Groq AI
-        meta = metadata_ai.generate_shorts_metadata(name)
+        # 2. Auto-trim silences/dead air (>0.5s) using Whisper word timestamps
+        tightened_path = os.path.join(run_dir, "tightened.mp4")
+        active_video, shifted_words = video_process.trim_silences_from_words(
+            src_path, words, tightened_path, max_duration=clip_duration
+        )
+
+        # 3. Generate animated, pop/karaoke word-level ASS captions
+        ass_path = os.path.join(run_dir, "captions.ass")
+        transcribe.generate_ass_captions(shifted_words, ass_path)
+
+        # 4. Render video with parallax zoom, loudnorm, even-pixel fix & burned ASS captions
+        video_process.process_video(active_video, out_path, ass_path=ass_path, max_seconds=clip_duration)
+
+        # 5. Generate 3 ranked title variants, description, and tags grounded in transcript
+        meta = metadata_ai.generate_shorts_metadata(name, transcript=transcript_text)
         title = meta["title"]
+        variants = meta.get("title_variants", [title, title, title])
         description = meta["description"]
         tags = meta["tags"]
 
         youtube_url = youtube_upload.upload_short(out_path, title, description, tags=tags)
 
         drive_utils.move_file(service, file_id, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID)
-        sheet_log.log_run(name, "SUCCESS", detected_lang="N/A", youtube_url=youtube_url)
-        notify.send(f"✅ Uploaded: {name}\n{youtube_url}")
+        sheet_log.log_run(
+            name, "SUCCESS", detected_lang=detected_lang, youtube_url=youtube_url,
+            title_1=variants[0], title_2=variants[1], title_3=variants[2],
+        )
+        notify.send(f"✅ Uploaded: {title}\n{youtube_url}")
 
     except Exception as e:
         log.exception("Failed processing %s", name)

@@ -1,7 +1,7 @@
 """
-Generate viral, clean YouTube Shorts titles, descriptions (captions), and tags
-using Groq AI (Llama 3.3 / 3.1) from raw video filenames.
-Automatically strips downloader watermarks (vidssave, y2mate), resolutions (720P), etc.
+Generate viral, authentic YouTube Shorts titles (3 ranked variants), captions, and tags
+using Groq AI (Llama 3.3 / 3.1) grounded in the actual transcript content.
+Strips download watermarks and enforces YouTube length limits without clickbait.
 """
 import json
 import logging
@@ -15,30 +15,34 @@ log = logging.getLogger("metadata_ai")
 def clean_filename_fallback(filename: str) -> str:
     """Basic fallback cleaner if AI call fails."""
     name = filename
-    # Remove common video extensions
     name = re.sub(r"\.(mp4|mov|mkv|avi|webm)$", "", name, flags=re.IGNORECASE)
-    # Remove website names and downloader tags
     name = re.sub(r"(vidssave\.com|y2mate\.is|savefrom|ssyoutube|snaptik|ytshorts)", "", name, flags=re.IGNORECASE)
-    # Remove resolution/bitrate tags like 720P, 1080P, 320 Kbps
     name = re.sub(r"\b(720p|1080p|480p|360p|320\s*kbps|128\s*kbps)\b", "", name, flags=re.IGNORECASE)
-    # Replace underscores, hyphens, extra punctuation with space
     name = re.sub(r"[_|•\-]+", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name or "Inspiring Short"
 
 
-def generate_shorts_metadata(filename: str) -> dict:
+def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
     """
-    Returns a dict with:
-      - 'title': High-CTR Short title (<90 chars, includes #shorts)
-      - 'description': Engaging caption with emojis and hashtags
-      - 'tags': list of relevant SEO search tags
+    Generates 3 ranked title variants, an engaging description, and tags
+    strictly grounded in what is actually said in the transcript.
+
+    Returns:
+      {
+        "title": title_1,
+        "title_variants": [title_1, title_2, title_3],
+        "description": description,
+        "tags": tags,
+      }
     """
     api_key = GROQ_API_KEY or OPENAI_API_KEY
     if not api_key:
         fallback = clean_filename_fallback(filename)
+        t1 = f"{fallback[:75]} #shorts"
         return {
-            "title": f"{fallback[:80]} #shorts",
+            "title": t1,
+            "title_variants": [t1, f"Secret to {fallback[:60]} #shorts", f"Watch this: {fallback[:60]} #shorts"],
             "description": f"{fallback}\n\n#shorts #podcast #viral",
             "tags": ["shorts", "podcast", "viral", "clips"],
         }
@@ -51,18 +55,37 @@ def generate_shorts_metadata(filename: str) -> dict:
         client = OpenAI(api_key=api_key)
         model = "gpt-4o-mini"
 
-    prompt = f"""You are a YouTube Shorts growth expert.
-Given this raw video filename: "{filename}"
+    # Limit transcript context to avoid token bloat while keeping full semantic context
+    context_transcript = transcript.strip()[:3500] if transcript else clean_filename_fallback(filename)
 
-Generate clean, viral YouTube Shorts metadata:
-1. Strip all download watermarks (like vidssave.com, y2mate), resolutions (720P, 1080P), audio bitrates, and ugly characters.
-2. Title: A compelling, high-CTR hook/title under 80 characters. Must end with "#shorts".
-3. Description/Caption: An engaging 2-3 sentence caption/hook for viewers, followed by 4-6 relevant trending hashtags.
-4. Tags: A list of 5-8 relevant search keyword tags.
+    prompt = f"""You are a top YouTube Shorts audience retention and CTR strategist.
+Below is the video filename and the exact transcript spoken in the video:
 
-Respond ONLY with valid JSON in this exact structure, with no extra text or markdown ticks:
+Filename: "{filename}"
+Transcript:
+\"\"\"
+{context_transcript}
+\"\"\"
+
+Task:
+Generate YouTube Shorts metadata strictly grounded in what is ACTUALLY SAID in the transcript.
+Avoid misleading clickbait (misleading titles destroy audience retention and algorithm reach).
+Titles must be intriguing, punchy, and authentic to the core insight.
+
+Requirements:
+1. Generate 3 distinct title variants, ranked in order of predicted CTR:
+   - Variant 1 (Primary): The strongest hook highlighting the core insight or punchline.
+   - Variant 2 (Curiosity/Question): A curiosity-driven question or insight reflecting the conversation.
+   - Variant 3 (Actionable/Takeaway): A direct, high-value takeaway or quote.
+   Each title MUST be under 80 characters (maximum 90 chars total) and end with "#shorts".
+2. Description / Caption: 2-3 engaging sentences summarizing the clip's authentic insight, followed by 4-6 relevant hashtags.
+3. Tags: 5-8 relevant search keyword tags.
+
+Respond ONLY with valid JSON in this exact structure:
 {{
-  "title": "...",
+  "title_1": "...",
+  "title_2": "...",
+  "title_3": "...",
   "description": "...",
   "tags": ["...", "..."]
 }}
@@ -72,33 +95,47 @@ Respond ONLY with valid JSON in this exact structure, with no extra text or mark
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
+            temperature=0.65,
             response_format={"type": "json_object"} if "llama" in model or "gpt" in model else None,
         )
         content = response.choices[0].message.content.strip()
-        # Clean potential markdown fences
         content = re.sub(r"^```json\s*", "", content)
         content = re.sub(r"\s*```$", "", content)
         data = json.loads(content)
 
-        title = str(data.get("title", "")).strip()
-        if not title.lower().endswith("#shorts"):
-            title = f"{title[:80]} #shorts"
+        def sanitize_title(t_str, default_suffix):
+            t = str(t_str or "").strip()
+            if not t:
+                t = default_suffix
+            if not t.lower().endswith("#shorts"):
+                t = f"{t[:78]} #shorts"
+            return t[:95]
+
+        fb = clean_filename_fallback(filename)
+        title_1 = sanitize_title(data.get("title_1"), fb)
+        title_2 = sanitize_title(data.get("title_2"), f"Insight: {fb}")
+        title_3 = sanitize_title(data.get("title_3"), f"Must Watch: {fb}")
 
         description = str(data.get("description", "")).strip()
         tags = list(data.get("tags", ["shorts", "podcast", "viral"]))
 
-        log.info("AI Generated Title: %s", title)
+        log.info("AI Generated Title 1 (Primary): %s", title_1)
+        log.info("AI Generated Title 2: %s", title_2)
+        log.info("AI Generated Title 3: %s", title_3)
+
         return {
-            "title": title[:100],
+            "title": title_1,
+            "title_variants": [title_1, title_2, title_3],
             "description": description,
             "tags": tags,
         }
     except Exception as e:
         log.warning("AI metadata generation failed: %s. Using fallback.", e)
-        fallback = clean_filename_fallback(filename)
+        fb = clean_filename_fallback(filename)
+        t1 = f"{fb[:75]} #shorts"
         return {
-            "title": f"{fallback[:80]} #shorts",
-            "description": f"{fallback}\n\n#shorts #podcast #viral",
+            "title": t1,
+            "title_variants": [t1, f"Secret to {fb[:60]} #shorts", f"Watch this: {fb[:60]} #shorts"],
+            "description": f"{fb}\n\n#shorts #podcast #viral",
             "tags": ["shorts", "podcast", "viral"],
         }
