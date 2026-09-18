@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Credentials and secrets
+*.json
+!package*.json
+*.env
+.env
+client_secret*.json
+
+# OS and temporary files
+.DS_Store
+*.swp
+/tmp/
