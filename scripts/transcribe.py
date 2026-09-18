@@ -12,18 +12,16 @@ from config import OPENAI_API_KEY, GROQ_API_KEY
 
 log = logging.getLogger("transcribe")
 
-api_key = GROQ_API_KEY or OPENAI_API_KEY
-if api_key.startswith("gsk_") or GROQ_API_KEY:
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.groq.com/openai/v1",
-    )
-    WHISPER_MODEL = "whisper-large-v3"
-    log.info("Using Groq Whisper-large-v3 transcription")
-else:
-    client = OpenAI(api_key=api_key)
-    WHISPER_MODEL = "whisper-1"
-    log.info("Using OpenAI Whisper-1 transcription")
+def get_transcribe_client():
+    api_key = GROQ_API_KEY or OPENAI_API_KEY
+    if not api_key:
+        raise ValueError("Neither GROQ_API_KEY nor OPENAI_API_KEY is configured.")
+    if api_key.startswith("gsk_") or GROQ_API_KEY:
+        log.info("Using Groq Whisper-large-v3 transcription")
+        return OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1"), "whisper-large-v3"
+    else:
+        log.info("Using OpenAI Whisper-1 transcription")
+        return OpenAI(api_key=api_key), "whisper-1"
 
 
 def extract_audio(video_path, audio_path):
@@ -51,9 +49,10 @@ def transcribe_to_srt(audio_path, srt_path):
     Language is auto-detected (works for English and Hindi automatically);
     Whisper returns the detected language too, which we log and return.
     """
+    client, whisper_model = get_transcribe_client()
     with open(audio_path, "rb") as f:
         result = client.audio.transcriptions.create(
-            model=WHISPER_MODEL,
+            model=whisper_model,
             file=f,
             response_format="verbose_json",
             # no "language" param passed -> auto-detect
