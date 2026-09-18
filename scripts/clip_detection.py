@@ -9,11 +9,33 @@ import re
 from openai import OpenAI
 
 from config import (
-    GROQ_API_KEY, OPENAI_API_KEY,
+    GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL,
     MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, MAX_CLIPS_PER_VIDEO,
 )
 
 log = logging.getLogger("clip_detection")
+
+
+def _get_best_groq_model(client):
+    preferred = [
+        "openai/gpt-oss-120b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "openai/gpt-oss-20b",
+        "groq/compound",
+        "qwen/qwen3.8-27b",
+    ]
+    try:
+        models = [m.id for m in client.models.list().data]
+        for p in preferred:
+            if p in models:
+                return p
+        for m in models:
+            if "whisper" not in m.lower() and "guard" not in m.lower():
+                return m
+    except Exception:
+        pass
+    return "openai/gpt-oss-120b"
 
 
 def _get_llm_client():
@@ -21,7 +43,9 @@ def _get_llm_client():
     if not api_key:
         return None, None
     if api_key.startswith("gsk_") or GROQ_API_KEY:
-        return OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1"), "llama-3.3-70b-versatile"
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        model = GROQ_CHAT_MODEL or _get_best_groq_model(client)
+        return client, model
     return OpenAI(api_key=api_key), "gpt-4o-mini"
 
 

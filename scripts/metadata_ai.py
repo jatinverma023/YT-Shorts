@@ -7,7 +7,8 @@ import json
 import logging
 import re
 from openai import OpenAI
-from config import GROQ_API_KEY, OPENAI_API_KEY
+from config import GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL
+from clip_detection import _get_best_groq_model
 
 log = logging.getLogger("metadata_ai")
 
@@ -50,7 +51,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
     # Initialize client (Groq or OpenAI)
     if api_key.startswith("gsk_") or GROQ_API_KEY:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-        model = "llama-3.3-70b-versatile"
+        model = GROQ_CHAT_MODEL or _get_best_groq_model(client)
     else:
         client = OpenAI(api_key=api_key)
         model = "gpt-4o-mini"
