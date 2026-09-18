@@ -91,8 +91,10 @@ VISUAL_VIGNETTE_ENABLED = os.environ.get("VISUAL_VIGNETTE_ENABLED", "true").lowe
 VISUAL_VIGNETTE_STRENGTH = float(os.environ.get("VISUAL_VIGNETTE_STRENGTH", "0.25"))
 VISUAL_MOTION_ENABLED = os.environ.get("VISUAL_MOTION_ENABLED", "true").lower() == "true"
 VISUAL_MOTION_MAX_ZOOM = float(os.environ.get("VISUAL_MOTION_MAX_ZOOM", "1.04"))
-BG_BRIGHTNESS = float(os.environ.get("BG_BRIGHTNESS", "-0.22"))
-BG_SATURATION = float(os.environ.get("BG_SATURATION", "0.95"))
+BG_BRIGHTNESS = float(os.environ.get("BG_BRIGHTNESS", "-0.08"))
+BG_SATURATION = float(os.environ.get("BG_SATURATION", "1.05"))
+FOREGROUND_SCALE = float(os.environ.get("FOREGROUND_SCALE", "1.18"))
+TARGET_FPS = int(os.environ.get("TARGET_FPS", "0"))
 ENABLE_ZOOM = VISUAL_MOTION_ENABLED
 BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))
 FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))

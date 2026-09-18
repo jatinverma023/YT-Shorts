@@ -18,7 +18,7 @@ from config import (
     VISUAL_CONTRAST, VISUAL_SATURATION, VISUAL_BRIGHTNESS, VISUAL_SHARPEN_AMOUNT,
     VISUAL_VIGNETTE_ENABLED, VISUAL_VIGNETTE_STRENGTH,
     VISUAL_MOTION_ENABLED, VISUAL_MOTION_MAX_ZOOM,
-    BG_BRIGHTNESS, BG_SATURATION,
+    BG_BRIGHTNESS, BG_SATURATION, FOREGROUND_SCALE, TARGET_FPS,
 )
 
 log = logging.getLogger("video_process")
@@ -339,7 +339,7 @@ def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool =
         video_chain = f"[0:v]{','.join(fg_filters)}[vout]"
     else:
         # Video is horizontal / landscape (e.g. 16:9)
-        # Background: 1080x1920 blurred + dimmed + slightly desaturated
+        # Background: 1080x1920 blurred + dimmed + saturated
         bg_chain = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,"
@@ -347,10 +347,20 @@ def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool =
         )
 
         # Foreground: center original aspect ratio scaled with even dimensions + micro-motion
-        fg_filters = [
-            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        ]
+        if FOREGROUND_SCALE > 1.0:
+            fg_w = int(round((TARGET_WIDTH * FOREGROUND_SCALE) / 2.0)) * 2
+            fg_scale_filters = [
+                f"scale={fg_w}:-2:force_original_aspect_ratio=decrease",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                f"crop=min(iw\\,{TARGET_WIDTH}):ih",
+            ]
+        else:
+            fg_scale_filters = [
+                f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            ]
+
+        fg_filters = list(fg_scale_filters)
         if motion_filter:
             fg_filters.append(motion_filter)
         fg_filters.append(enhance)
@@ -405,6 +415,8 @@ def process_video(input_path: str, output_path: str, ass_path: str = None, max_s
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p",
     ])
+    if TARGET_FPS and TARGET_FPS > 0:
+        cmd.extend(["-r", str(TARGET_FPS)])
     if has_audio:
         cmd.extend(["-c:a", "aac", "-b:a", "128k"])
 
