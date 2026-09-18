@@ -285,6 +285,35 @@ def get_clip_by_status(target_status: str, service=None):
     return None
 
 
+def cancel_clips_for_video(drive_file_id: str, reason: str = "source_video_deleted", service=None) -> int:
+    """Marks all pending or retry clips for a given drive_file_id as 'cancelled'."""
+    service = service or get_sheets_service()
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!A:K",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for cancellation: %s", e)
+        return 0
+
+    rows = resp.get("values", [])
+    if len(rows) <= 1:
+        return 0
+
+    cancelled_count = 0
+    for idx, row in enumerate(rows[1:], start=2):
+        if len(row) > 1 and row[1].strip() == drive_file_id:
+            status = row[6].strip().lower() if len(row) > 6 else ""
+            if status in ("pending", "retry_after_quota_reset"):
+                update_clip_status(idx, "cancelled", error=reason, service=service)
+                cancelled_count += 1
+
+    if cancelled_count > 0:
+        log.info("Cancelled %d queued clip(s) for removed video (ID: %s)", cancelled_count, drive_file_id)
+    return cancelled_count
+
+
 def get_video_clip_counts(drive_file_id: str, service=None) -> dict:
     """Returns counts of total, pending, done, failed, and retry_after_quota_reset clips for a given drive_file_id."""
     service = service or get_sheets_service()

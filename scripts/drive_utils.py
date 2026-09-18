@@ -75,3 +75,16 @@ def move_file(service, file_id, from_folder_id, to_folder_id):
         fields="id, parents",
     ).execute()
     log.info("Moved file %s -> folder %s", file_id, to_folder_id)
+
+
+def get_file_metadata(service, file_id: str):
+    """Fetches file metadata including whether it is trashed or still exists in Google Drive."""
+    try:
+        return service.files().get(
+            fileId=file_id,
+            fields="id, name, trashed, parents",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception as e:
+        log.warning("Could not fetch metadata for file %s: %s", file_id, e)
+        return None

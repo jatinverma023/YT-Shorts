@@ -352,12 +352,31 @@ def main():
     sheet_log.reset_expired_quota_clips(min_age_hours=20.0)
 
     # Step A: Check durable queue for pending clips from previous runs/batches
-    pending = sheet_log.get_next_pending_clip()
-    if pending:
+    while True:
+        pending = sheet_log.get_next_pending_clip()
+        if not pending:
+            break
+
         row_number, clip = pending
+        drive_file_id = clip["drive_file_id"]
+        video_name = clip["source_video_name"]
+
+        # Verify source file still exists and is not trashed in Google Drive
+        file_meta = drive_utils.get_file_metadata(drive_service, drive_file_id)
+        if not file_meta or file_meta.get("trashed", False):
+            log.warning(
+                "Source video '%s' (ID: %s) was deleted or moved to trash in Google Drive. "
+                "Cancelling remaining queued clips for this video.",
+                video_name, drive_file_id,
+            )
+            sheet_log.cancel_clips_for_video(
+                drive_file_id, reason="source_video_deleted_or_trashed", service=None
+            )
+            continue
+
         log.info(
             "Found pending clip in queue: row %d (Video: '%s', Clip #%s: %.1fs - %.1fs)",
-            row_number, clip["source_video_name"], clip["clip_index"], clip["start_time"], clip["end_time"],
+            row_number, video_name, clip["clip_index"], clip["start_time"], clip["end_time"],
         )
         process_queue_clip(drive_service, row_number, clip)
         return
