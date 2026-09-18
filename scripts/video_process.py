@@ -48,6 +48,32 @@ def get_duration_seconds(input_path: str) -> float:
     return float(out.stdout.strip())
 
 
+def extract_clip_segment(source_path: str, start_time: float, end_time: float, output_path: str) -> str:
+    """
+    Extracts an exact time slice from the source video (start_time to end_time).
+    Uses fast seeking with re-encoding to guarantee frame-accurate boundaries and avoid
+    frozen audio/video frames at the cut point.
+    """
+    duration = max(1.0, end_time - start_time)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{start_time:.3f}",
+        "-i", source_path,
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-avoid_negative_ts", "make_zero",
+        output_path,
+    ]
+    log.info("Extracting clip segment [%.1fs - %.1fs] (%.1fs) -> %s", start_time, end_time, duration, output_path)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        log.error("FFmpeg extract_clip_segment failed with stderr:\n%s", e.stderr)
+        raise
+    return output_path
+
+
 def trim_silences_from_words(input_path: str, words: list, output_path: str, max_duration=None):
     """
     Identifies dead air gaps (> SILENCE_THRESHOLD_SECONDS) from Whisper word timestamps,

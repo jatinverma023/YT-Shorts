@@ -29,11 +29,14 @@ def get_transcribe_client():
 
 
 def extract_audio(video_path, audio_path, max_seconds=None):
-    """Pull a mono 16kHz wav out of the video for transcription, optionally trimmed."""
+    """Pull mono 16kHz audio (WAV or 64k MP3) out of the video for transcription, optionally trimmed."""
     cmd = ["ffmpeg", "-y", "-i", video_path]
     if max_seconds:
         cmd.extend(["-t", str(max_seconds)])
-    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", audio_path])
+    cmd.extend(["-vn", "-ac", "1", "-ar", "16000"])
+    if audio_path.lower().endswith(".mp3"):
+        cmd.extend(["-b:a", "64k"])
+    cmd.append(audio_path)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:

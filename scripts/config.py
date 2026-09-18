@@ -14,9 +14,15 @@ DRIVE_FAILED_FOLDER_ID = os.environ.get("DRIVE_FAILED_FOLDER_ID", "").strip()
 # Store the FULL JSON key content (not a path) as a GitHub secret.
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
 
-# --- Google Sheet used as a run log ---
+# --- Google Sheet used as a run log and durable clip queue ---
 LOG_SHEET_ID = os.environ["LOG_SHEET_ID"].strip()
 LOG_SHEET_TAB = os.environ.get("LOG_SHEET_TAB", "Log").strip()
+CLIP_QUEUE_TAB = os.environ.get("CLIP_QUEUE_TAB", "clip_queue").strip()
+
+# --- Multi-Clip Detection & Splitting ---
+MIN_CLIP_SECONDS = int(os.environ.get("MIN_CLIP_SECONDS", "20"))
+MAX_CLIP_SECONDS = int(os.environ.get("MAX_CLIP_SECONDS", "59"))
+MAX_CLIPS_PER_VIDEO = int(os.environ.get("MAX_CLIPS_PER_VIDEO", "5"))
 
 # --- Transcription (Groq Whisper-large-v3 or OpenAI Whisper) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
