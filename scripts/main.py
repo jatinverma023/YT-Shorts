@@ -243,6 +243,9 @@ def main():
     drive_service = drive_utils.get_drive_service()
     sheet_log.ensure_clip_queue_sheet()
 
+    # Step 0: Auto-reset quota-exhausted clips older than 20 hours (past YouTube midnight PT reset)
+    sheet_log.reset_expired_quota_clips(min_age_hours=20.0)
+
     # Step A: Check durable queue for pending clips from previous runs/batches
     pending = sheet_log.get_next_pending_clip()
     if pending:

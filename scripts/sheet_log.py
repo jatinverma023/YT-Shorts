@@ -154,17 +154,97 @@ def get_next_pending_clip(service=None):
 
 
 def update_clip_status(row_number: int, status: str, youtube_url: str = "", error: str = "", service=None):
-    """Updates the status (columns G:J) of a specific row in the clip_queue."""
+    """Updates the status and updated_at timestamp of a specific row in the clip_queue."""
     service = service or get_sheets_service()
     now = datetime.datetime.utcnow().isoformat()
-    range_name = f"{CLIP_QUEUE_TAB}!G{row_number}:J{row_number}"
+    # Update columns G:I (status, youtube_url, error)
     service.spreadsheets().values().update(
         spreadsheetId=LOG_SHEET_ID,
-        range=range_name,
+        range=f"{CLIP_QUEUE_TAB}!G{row_number}:I{row_number}",
         valueInputOption="RAW",
-        body={"values": [[status, youtube_url, error, now]]},
+        body={"values": [[status, youtube_url, error]]},
+    ).execute()
+    # Update column K (updated_at)
+    service.spreadsheets().values().update(
+        spreadsheetId=LOG_SHEET_ID,
+        range=f"{CLIP_QUEUE_TAB}!K{row_number}",
+        valueInputOption="RAW",
+        body={"values": [[now]]},
     ).execute()
     log.info("Updated queue row %d -> status: %s", row_number, status)
+
+
+def reset_expired_quota_clips(min_age_hours: float = 20.0, service=None) -> int:
+    """
+    Finds any clips in clip_queue with status 'retry_after_quota_reset' whose
+    updated_at timestamp is older than min_age_hours (safely past YouTube's midnight PT quota reset),
+    and resets their status back to 'pending' so they are processed normally in the current run.
+    Returns the number of clips reset.
+    """
+    service = service or get_sheets_service()
+    try:
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!A:K",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for quota reset check: %s", e)
+        return 0
+
+    rows = resp.get("values", [])
+    if len(rows) <= 1:
+        return 0
+
+    now = datetime.datetime.utcnow()
+    reset_count = 0
+
+    for idx, row in enumerate(rows[1:], start=2):
+        padded = row + [""] * (11 - len(row))
+        status = padded[6].strip().lower()
+
+        if status == "retry_after_quota_reset":
+            time_str = padded[10].strip() or padded[9].strip()
+            should_reset = False
+
+            if not time_str:
+                should_reset = True
+            else:
+                try:
+                    ts_clean = time_str[:-1] + "+00:00" if time_str.endswith("Z") else time_str
+                    updated_time = datetime.datetime.fromisoformat(ts_clean)
+                    if updated_time.tzinfo is not None:
+                        now_ts = datetime.datetime.now(datetime.timezone.utc)
+                    else:
+                        now_ts = datetime.datetime.utcnow()
+                    age_seconds = (now_ts - updated_time).total_seconds()
+                    if age_seconds >= min_age_hours * 3600:
+                        should_reset = True
+                        log.info(
+                            "Clip row %d was marked quota_exceeded %.1f hours ago (>= %.1f hours). Resetting to pending.",
+                            idx, age_seconds / 3600, min_age_hours,
+                        )
+                    else:
+                        log.info(
+                            "Clip row %d marked quota_exceeded %.1f hours ago (< %.1f hours). Still waiting for quota reset.",
+                            idx, age_seconds / 3600, min_age_hours,
+                        )
+                except Exception as err:
+                    log.warning("Could not parse timestamp '%s' on row %d: %s. Defaulting to reset.", time_str, idx, err)
+                    should_reset = True
+
+            if should_reset:
+                update_clip_status(
+                    idx,
+                    "pending",
+                    youtube_url="",
+                    error="",
+                    service=service,
+                )
+                reset_count += 1
+
+    if reset_count > 0:
+        log.info("Reset %d quota-exhausted clip(s) back to 'pending'.", reset_count)
+    return reset_count
 
 
 def get_clip_by_status(target_status: str, service=None):
