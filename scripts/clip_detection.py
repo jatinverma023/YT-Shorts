@@ -98,9 +98,9 @@ def detect_clips_from_transcript(
             formatted_transcript_lines.append(f"[{st:.1f}s - {et:.1f}s] {txt}")
 
     transcript_text = "\n".join(formatted_transcript_lines)
-    # Truncate if extremely large to stay within safe prompt boundaries (85k chars fits safely in LLaMA 3.3 128k context)
-    if len(transcript_text) > 85000:
-        transcript_text = transcript_text[:85000] + "\n...[transcript truncated]"
+    # Stay within Groq free-tier rate limit (~7,000 ITPM): 16k chars is ~3,500 tokens
+    if len(transcript_text) > 16000:
+        transcript_text = transcript_text[:16000] + "\n...[transcript truncated]"
 
     prompt = f"""You are a master YouTube Shorts viral strategist and video editor.
 Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
@@ -137,7 +137,8 @@ Respond ONLY with valid JSON in this exact structure:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
-            response_format={"type": "json_object"} if "llama" in model or "gpt" in model else None,
+            max_tokens=1200,
+            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
         )
         content = response.choices[0].message.content.strip()
         content = re.sub(r"^```json\s*", "", content)
@@ -263,20 +264,29 @@ def _fallback_clips(
     max_clip_seconds: int,
     max_clips: int,
 ) -> list:
-    """Generates non-overlapping chronological chunks if AI detection fails."""
+    """Generates non-overlapping chronological chunks with distinct hooks if AI detection fails."""
+    FALLBACK_PUNCHLINES = [
+        "Watch Till The End 🔥",
+        "Wait For The Twist 🤯",
+        "Reality Check Revealed ⚡",
+        "The Truth Exposed ⚠️",
+        "Must Watch Insight ✨",
+    ]
     clips = []
     chunk_len = float(max_clip_seconds)
     curr_start = 0.0
 
     while curr_start + min_clip_seconds <= total_duration and len(clips) < max_clips:
         curr_end = min(total_duration, curr_start + chunk_len)
+        idx = len(clips) + 1
+        punchline = FALLBACK_PUNCHLINES[(idx - 1) % len(FALLBACK_PUNCHLINES)]
         clips.append({
             "start_time": round(curr_start, 2),
             "end_time": round(curr_end, 2),
             "duration": round(curr_end - curr_start, 2),
-            "hook_summary": f"Highlight segment starting at {int(curr_start)}s",
-            "title_idea": f"Key Highlight Part {len(clips) + 1} #shorts",
-            "punchline": "Watch Till The End 🔥",
+            "hook_summary": f"Highlight segment #{idx} ({int(curr_start)}s - {int(curr_end)}s)",
+            "title_idea": f"Key Highlight Part {idx} #shorts",
+            "punchline": punchline,
         })
         curr_start = curr_end
 
@@ -285,7 +295,7 @@ def _fallback_clips(
             "start_time": 0.0,
             "end_time": round(min(total_duration, float(max_clip_seconds)), 2),
             "duration": round(min(total_duration, float(max_clip_seconds)), 2),
-            "hook_summary": "Highlight segment",
+            "hook_summary": "Highlight segment #1",
             "title_idea": "Key Highlight #shorts",
             "punchline": "Watch Till The End 🔥",
         })

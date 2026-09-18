@@ -101,8 +101,9 @@ Respond ONLY with valid JSON in this exact structure:
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.65,
-            response_format={"type": "json_object"} if "llama" in model or "gpt" in model else None,
+            temperature=0.6,
+            max_tokens=1000,
+            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
         )
         content = response.choices[0].message.content.strip()
         content = re.sub(r"^```json\s*", "", content)

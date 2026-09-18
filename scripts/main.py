@@ -127,7 +127,10 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
         variants = meta.get("title_variants", [title, title, title])
         description = meta["description"]
         tags = meta["tags"]
+        # Prefer authentic AI-generated punchline for this specific clip slice
         punchline = clip.get("punchline") or meta.get("punchline") or clip.get("hook_summary", "")
+        if (not punchline or punchline == "Watch Till The End 🔥") and meta.get("punchline"):
+            punchline = meta["punchline"]
 
         # 6. Generate animated, pop/karaoke word-level ASS captions with top punchline hook
         clip_duration = video_process.get_duration_seconds(active_video)
