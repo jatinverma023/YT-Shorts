@@ -20,6 +20,7 @@ import video_process
 import youtube_upload
 import sheet_log
 import notify
+import metadata_ai
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("main")
@@ -53,9 +54,13 @@ def process_one(service, file_info):
         # Process and enhance video with cinematic filters (no subtitles)
         video_process.process_video(src_path, out_path, max_seconds=clip_duration)
 
-        title = base.replace("_", " ").replace("-", " ").strip()[:90] + " #shorts"
-        description = f"{title}\n\n#shorts #podcast #viral"
-        youtube_url = youtube_upload.upload_short(out_path, title, description)
+        # Generate clean, viral Title, Caption/Description, and Tags with Groq AI
+        meta = metadata_ai.generate_shorts_metadata(name)
+        title = meta["title"]
+        description = meta["description"]
+        tags = meta["tags"]
+
+        youtube_url = youtube_upload.upload_short(out_path, title, description, tags=tags)
 
         drive_utils.move_file(service, file_id, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID)
         sheet_log.log_run(name, "SUCCESS", detected_lang="N/A", youtube_url=youtube_url)
