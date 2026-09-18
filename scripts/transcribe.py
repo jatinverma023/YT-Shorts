@@ -16,7 +16,10 @@ from config import (
     CAPTION_BASE_COLOR, CAPTION_OUTLINE_COLOR, WORDS_PER_PHRASE,
     ENABLE_TOP_PUNCHLINE, PUNCHLINE_FONT, PUNCHLINE_FONT_SIZE,
     PUNCHLINE_MARGIN_TOP, PUNCHLINE_COLOR, PUNCHLINE_OUTLINE_COLOR,
+    CAPTION_LANGUAGE_MODE, CAPTION_UPPERCASE, CAPTION_MAX_LINES,
+    CAPTION_MAX_CHARS_PER_LINE, CAPTION_MAX_WORDS, CAPTION_MARGIN_BOTTOM,
 )
+from transliterate import romanize_words, has_devanagari
 
 log = logging.getLogger("transcribe")
 
@@ -254,6 +257,103 @@ def transcribe_audio(audio_path):
     }
 
 
+def _sanitize_ass(text: str) -> str:
+    """Escapes/removes braces and backslashes to prevent ASS tag injection."""
+    if not text:
+        return ""
+    return str(text).replace("\\", "").replace("{", "").replace("}", "").strip()
+
+
+def find_phrase_split(phrase: list, max_chars_per_line: int = CAPTION_MAX_CHARS_PER_LINE) -> int:
+    """
+    Finds the optimal word index k to split phrase into 2 lines.
+    Returns len(phrase) if phrase comfortably fits on 1 line.
+    """
+    n = len(phrase)
+    if n <= 2 or CAPTION_MAX_LINES < 2:
+        return n
+
+    full_text = " ".join(str(w.get("word", "")) for w in phrase)
+    if len(full_text) <= max_chars_per_line and n <= 3:
+        return n
+
+    best_k = n
+    best_penalty = float("inf")
+
+    for k in range(1, n):
+        l1 = " ".join(str(w.get("word", "")) for w in phrase[:k])
+        l2 = " ".join(str(w.get("word", "")) for w in phrase[k:])
+        len1 = len(l1)
+        len2 = len(l2)
+
+        penalty = max(len1, len2) + abs(len1 - len2) * 0.5
+        if len1 > max_chars_per_line:
+            penalty += 40.0
+        if len2 > max_chars_per_line:
+            penalty += 40.0
+
+        if penalty < best_penalty:
+            best_penalty = penalty
+            best_k = k
+
+    return best_k
+
+
+def group_words_into_phrases(
+    words: list,
+    max_words: int = None,
+    max_chars: int = None,
+    max_gap: float = 0.40,
+    max_duration: float = 3.2,
+) -> list:
+    """
+    Groups words into short phrases (1-2 lines on screen) based on:
+    - Natural silence/pause breaks (gap between words >= max_gap)
+    - Strong punctuation (. ! ? ,)
+    - Maximum word count per phrase (default CAPTION_MAX_WORDS = 8)
+    - Maximum character length per phrase
+    - Maximum duration
+    """
+    if not words:
+        return []
+
+    if max_words is None:
+        max_words = CAPTION_MAX_WORDS
+    if max_chars is None:
+        max_chars = CAPTION_MAX_CHARS_PER_LINE * 2
+
+    phrases = []
+    current_phrase = []
+
+    for w in words:
+        if not current_phrase:
+            current_phrase.append(w)
+            continue
+
+        prev_w = current_phrase[-1]
+        gap = float(w.get("start", 0.0)) - float(prev_w.get("end", 0.0))
+        phrase_dur = float(w.get("end", 0.0)) - float(current_phrase[0].get("start", 0.0))
+        curr_text = " ".join(str(item.get("word", "")) for item in current_phrase + [w])
+
+        prev_word_str = str(prev_w.get("word", "")).rstrip()
+        has_clause_break = prev_word_str.endswith((".", "!", "?", ","))
+        is_gap_break = gap >= max_gap
+        is_max_words = len(current_phrase) >= max_words
+        is_max_chars = len(curr_text) > max_chars
+        is_max_duration = phrase_dur > max_duration
+
+        if has_clause_break or is_gap_break or is_max_words or is_max_chars or is_max_duration:
+            phrases.append(current_phrase)
+            current_phrase = [w]
+        else:
+            current_phrase.append(w)
+
+    if current_phrase:
+        phrases.append(current_phrase)
+
+    return phrases
+
+
 def generate_ass_captions(
     words,
     ass_path,
@@ -266,7 +366,13 @@ def generate_ass_captions(
     Generates an ASS subtitle file with:
     - Top punchline hook header (Alignment: 8 = Top Center) matching viral Shorts design
     - Animated, pop/karaoke word-level highlights in lower third (Alignment: 2 = Bottom Center).
+    - Modern Roman Hindi / Hinglish conversion preserving timestamps and English terms.
+    - Balanced 1-2 line wrapping with safe bottom margin.
     """
+    # Romanize words if configured (guarantees strict 1:1 timestamp preservation)
+    if words and CAPTION_LANGUAGE_MODE == "romanized":
+        words = romanize_words(words)
+
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {target_width}
@@ -275,7 +381,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONT_SIZE},{CAPTION_BASE_COLOR},&H000000FF,{CAPTION_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,2,40,40,260,1
+Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONT_SIZE},{CAPTION_BASE_COLOR},&H000000FF,{CAPTION_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,2,40,40,{CAPTION_MARGIN_BOTTOM},1
 Style: HeaderPunchline,{PUNCHLINE_FONT},{PUNCHLINE_FONT_SIZE},{PUNCHLINE_COLOR},&H000000FF,{PUNCHLINE_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,0,0,1,3.5,1.5,8,50,50,{PUNCHLINE_MARGIN_TOP},1
 
 [Events]
@@ -294,8 +400,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     # Add top punchline event if enabled and provided
     if ENABLE_TOP_PUNCHLINE and punchline:
-        clean_punchline = str(punchline).strip().replace("{", "").replace("}", "")
+        clean_punchline = _sanitize_ass(punchline)
         if clean_punchline:
+            if has_devanagari(clean_punchline) and CAPTION_LANGUAGE_MODE == "romanized":
+                p_words = [{"word": w, "start": 0.0, "end": 0.0} for w in clean_punchline.split()]
+                clean_punchline = " ".join(pw["word"] for pw in romanize_words(p_words))
             p_start_str = _format_ass_time(0.0)
             p_end_str = _format_ass_time(p_end)
             dialogue_lines.append(
@@ -307,39 +416,49 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(header + "\n".join(dialogue_lines) + "\n")
         return ass_path
 
-    # Chunk words into small phrases (e.g. 3-4 words)
-    phrase_size = max(2, WORDS_PER_PHRASE)
-    phrases = [words[i:i + phrase_size] for i in range(0, len(words), phrase_size)]
+    # Group words into natural, balanced phrases (1-2 lines)
+    phrases = group_words_into_phrases(words)
 
-    for phrase in phrases:
+    for p_idx, phrase in enumerate(phrases):
         if not phrase:
             continue
         n_words = len(phrase)
+        split_k = find_phrase_split(phrase, CAPTION_MAX_CHARS_PER_LINE)
+
+        # Lookahead to next phrase start time to guarantee zero overlap
+        next_phrase_start = None
+        if p_idx + 1 < len(phrases) and phrases[p_idx + 1]:
+            next_phrase_start = phrases[p_idx + 1][0].get("start")
+
         for idx in range(n_words):
             current_word = phrase[idx]
             w_start = current_word["start"]
-            # Connect seamlessly to next word's start to avoid visual flickering
             if idx < n_words - 1:
+                # Next word's start within the same phrase
                 w_end = phrase[idx + 1]["start"]
             else:
-                w_end = current_word["end"] + 0.1
+                # Last word in phrase: match original word end timestamp exactly
+                w_end = current_word["end"]
+                if next_phrase_start is not None:
+                    w_end = min(w_end, next_phrase_start)
 
-            # Build line with the current word highlighted and scaled
-            rendered_words = []
-            for j, w in enumerate(phrase):
-                clean_w = w["word"].replace("{", "").replace("}", "")
-                if j == idx:
-                    # Active word: Highlight color + 15% pop-up scale
-                    rendered_words.append(
-                        f"{{\\c{CAPTION_HIGHLIGHT_COLOR}\\fscx115\\fscy115}}{clean_w}{{\\r}}"
-                    )
+            def _render_word(w_obj, is_act):
+                clean_w = _sanitize_ass(w_obj.get("word", ""))
+                if is_act:
+                    # Active word: Highlight color + 10% pop scale, then return to base style
+                    return f"{{\\c{CAPTION_HIGHLIGHT_COLOR}\\fscx110\\fscy110}}{clean_w}{{\\c{CAPTION_BASE_COLOR}\\fscx100\\fscy100}}"
                 else:
-                    # Inactive word: Base white
-                    rendered_words.append(
-                        f"{{\\c{CAPTION_BASE_COLOR}}}{clean_w}"
-                    )
+                    # Inactive word: Base white color + normal 100% scale
+                    return f"{{\\c{CAPTION_BASE_COLOR}\\fscx100\\fscy100}}{clean_w}"
 
-            text_line = " ".join(rendered_words)
+            line1_rendered = [_render_word(phrase[j], j == idx) for j in range(split_k)]
+            line2_rendered = [_render_word(phrase[j], j == idx) for j in range(split_k, n_words)]
+
+            if line2_rendered:
+                text_line = " ".join(line1_rendered) + "\\N" + " ".join(line2_rendered)
+            else:
+                text_line = " ".join(line1_rendered)
+
             start_str = _format_ass_time(w_start)
             end_str = _format_ass_time(max(w_end, w_start + 0.05))
             dialogue_lines.append(

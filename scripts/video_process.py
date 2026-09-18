@@ -15,6 +15,10 @@ from config import (
     TARGET_WIDTH, TARGET_HEIGHT, ENABLE_ZOOM, BG_ZOOM_SPEED, FG_ZOOM_SPEED,
     ENABLE_SILENCE_REMOVAL, SILENCE_THRESHOLD_SECONDS, SILENCE_PADDING_SECONDS,
     ENABLE_LOUDNORM, LOUDNORM_TARGET_I,
+    VISUAL_CONTRAST, VISUAL_SATURATION, VISUAL_BRIGHTNESS, VISUAL_SHARPEN_AMOUNT,
+    VISUAL_VIGNETTE_ENABLED, VISUAL_VIGNETTE_STRENGTH,
+    VISUAL_MOTION_ENABLED, VISUAL_MOTION_MAX_ZOOM,
+    BG_BRIGHTNESS, BG_SATURATION,
 )
 
 log = logging.getLogger("video_process")
@@ -233,22 +237,86 @@ def check_has_audio(input_path: str) -> bool:
         return True
 
 
+def get_video_fps(input_path: str) -> float:
+    """Return video frame rate (e.g. 30.0, 25.0) using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_path,
+        ]
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip()
+        if "/" in out:
+            num, den = out.split("/")
+            return float(num) / float(den)
+        return float(out)
+    except Exception as e:
+        log.warning("Could not probe video frame rate: %s. Defaulting to 30.0 fps.", e)
+        return 30.0
+
+
+def build_micro_motion_filter(fps: float = 30.0, max_zoom: float = VISUAL_MOTION_MAX_ZOOM) -> str:
+    """
+    Constructs a smooth, deterministic sinusoidal micro-zoom filter using FFmpeg's
+    perspective filter evaluated per-frame on the input frame index ('in').
+    Cycle duration: 10 seconds (10 * fps frames).
+    Range: 1.00x -> max_zoom -> 1.00x.
+    Guarantees:
+    - Exactly 100% preservation of frame timing and frame counts
+    - Zero frame drops or frame duplications
+    - Exact frame dimension preservation
+    - No audio or subtitle desync
+    """
+    cycle_frames = max(30, int(round(fps * 10)))
+    clamped_zoom = max(1.001, min(1.10, float(max_zoom)))
+    max_alpha = round((clamped_zoom - 1.0) / (2.0 * clamped_zoom), 6)
+    a_expr = f"{max_alpha}*0.5*(1-cos(2*PI*in/{cycle_frames}))"
+
+    return (
+        f"perspective="
+        f"x0=W*({a_expr}):y0=H*({a_expr}):"
+        f"x1=W*(1-({a_expr})):y1=H*({a_expr}):"
+        f"x2=W*({a_expr}):y2=H*(1-({a_expr})):"
+        f"x3=W*(1-({a_expr})):y3=H*(1-({a_expr})):"
+        f"eval=frame:interpolation=linear"
+    )
+
+
 def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool = True):
     """
     Constructs the FFmpeg filtergraph and stream mappings:
-    - Vertical Short framing (blurred backdrop for landscape, center uncropped foreground)
-    - Even-pixel scaling constraint (prevents odd-pixel libx264 crashes)
-    - Visual grading (unsharp + eq)
-    - Burned-in ASS captions (karaoke/pop style)
-    - EBU R128 loudness normalization integrated into filtergraph (avoids -af / -filter_complex conflict)
+    - Vertical Short framing (blurred/dimmed backdrop for landscape, centered sharp foreground)
+    - Deterministic foreground micro-motion (subtle breathing zoom, no frame rate alteration)
+    - Professional color grading (contrast, saturation, brightness, unsharp)
+    - Subtle 9:16 elliptical vignette on final composition
+    - Burned-in ASS captions (karaoke/pop style, completely unaltered)
+    - EBU R128 loudness normalization integrated into filtergraph
     """
     width, height = get_video_dimensions(input_path)
+    fps = get_video_fps(input_path)
     is_portrait = (height > width) and ((height / width) >= 1.3)
 
-    # Visual enhancements for crispness and rich colors on mobile displays
-    enhance = "unsharp=5:5:0.8:5:5:0.0,eq=contrast=1.06:saturation=1.18:brightness=0.01"
+    # 1. Professional color treatment (conservative, crisp, natural skin tones)
+    enhance = (
+        f"unsharp=5:5:{VISUAL_SHARPEN_AMOUNT:.2f}:5:5:0.0,"
+        f"eq=contrast={VISUAL_CONTRAST:.2f}:saturation={VISUAL_SATURATION:.2f}:brightness={VISUAL_BRIGHTNESS:.2f}"
+    )
 
-    # Subtitle burning filter
+    # 2. Subtle vignette on the 1080x1920 composition (applied before subtitles)
+    if VISUAL_VIGNETTE_ENABLED:
+        vignette_filter = "vignette=angle=PI/4:aspect=9/16"
+    else:
+        vignette_filter = None
+
+    # 3. Micro-motion filter (applied strictly to the visual foreground layer)
+    if VISUAL_MOTION_ENABLED and VISUAL_MOTION_MAX_ZOOM > 1.0:
+        motion_filter = build_micro_motion_filter(fps=fps, max_zoom=VISUAL_MOTION_MAX_ZOOM)
+    else:
+        motion_filter = None
+
+    # 4. Subtitle burning filter (applied LAST to visual canvas)
     if ass_path and os.path.isfile(ass_path):
         ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
         sub_filter = f"subtitles='{ass_escaped}'"
@@ -261,20 +329,41 @@ def build_ffmpeg_filter(input_path: str, ass_path: str = None, has_audio: bool =
             f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_WIDTH}:{TARGET_HEIGHT}"
         )
-        video_chain = f"[0:v]{scale_crop},{enhance},{sub_filter}[vout]"
+        fg_filters = [scale_crop]
+        if motion_filter:
+            fg_filters.append(motion_filter)
+        fg_filters.append(enhance)
+        if vignette_filter:
+            fg_filters.append(vignette_filter)
+        fg_filters.append(sub_filter)
+        video_chain = f"[0:v]{','.join(fg_filters)}[vout]"
     else:
-        # Video is horizontal / landscape:
-        # Background: 1080x1920 blurred + dimmed
-        # Foreground: center original aspect ratio scaled with even dimensions + sharpening
+        # Video is horizontal / landscape (e.g. 16:9)
+        # Background: 1080x1920 blurred + dimmed + slightly desaturated
         bg_chain = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,eq=brightness=-0.22:saturation=1.2[bg]"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,"
+            f"eq=brightness={BG_BRIGHTNESS:.2f}:saturation={BG_SATURATION:.2f}[bg]"
         )
-        fg_chain = (
-            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"scale=trunc(iw/2)*2:trunc(ih/2)*2,{enhance}[fg]"
-        )
-        merge_chain = f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];[merged]{sub_filter}[vout]"
+
+        # Foreground: center original aspect ratio scaled with even dimensions + micro-motion
+        fg_filters = [
+            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        ]
+        if motion_filter:
+            fg_filters.append(motion_filter)
+        fg_filters.append(enhance)
+        fg_chain = f"[0:v]{','.join(fg_filters)}[fg]"
+
+        # Merge foreground on background
+        post_overlay = []
+        if vignette_filter:
+            post_overlay.append(vignette_filter)
+        post_overlay.append(sub_filter)
+        post_str = f",{','.join(post_overlay)}" if post_overlay else ""
+
+        merge_chain = f"[bg][fg]overlay=(W-w)/2:(H-h)/2{post_str}[vout]"
         video_chain = f"{bg_chain};{fg_chain};{merge_chain}"
 
     # Audio stream handling

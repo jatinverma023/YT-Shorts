@@ -36,6 +36,10 @@ CLIP_QUEUE_TAB = os.environ.get("CLIP_QUEUE_TAB", "clip_queue").strip()
 MIN_CLIP_SECONDS = int(os.environ.get("MIN_CLIP_SECONDS", "20"))
 MAX_CLIP_SECONDS = int(os.environ.get("MAX_CLIP_SECONDS", "59"))
 MAX_CLIPS_PER_VIDEO = int(os.environ.get("MAX_CLIPS_PER_VIDEO", "5"))
+MIN_CLIP_QUALITY_SCORE = float(os.environ.get("MIN_CLIP_QUALITY_SCORE", "70.0"))
+CLIP_OVERLAP_THRESHOLD = float(os.environ.get("CLIP_OVERLAP_THRESHOLD", "0.35"))
+MIN_STANDALONE_SCORE = float(os.environ.get("MIN_STANDALONE_SCORE", "7.0"))
+
 
 # --- Transcription & LLM (Groq Whisper-large-v3 or OpenAI Whisper) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
@@ -56,12 +60,18 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 MAX_SHORT_SECONDS = int(os.environ.get("MAX_SHORT_SECONDS", "59"))
-SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", "Noto Sans Devanagari")
+SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", "Arial")
 SUBTITLE_FONT_SIZE = int(os.environ.get("SUBTITLE_FONT_SIZE", "52"))  # ASS 1080x1920 PlayRes scale
 CAPTION_HIGHLIGHT_COLOR = os.environ.get("CAPTION_HIGHLIGHT_COLOR", "&H0000FFFF&")  # Yellow in ASS hex
 CAPTION_BASE_COLOR = os.environ.get("CAPTION_BASE_COLOR", "&H00FFFFFF&")            # White
 CAPTION_OUTLINE_COLOR = os.environ.get("CAPTION_OUTLINE_COLOR", "&H00000000&")      # Black
 WORDS_PER_PHRASE = int(os.environ.get("WORDS_PER_PHRASE", "4"))
+CAPTION_LANGUAGE_MODE = os.environ.get("CAPTION_LANGUAGE_MODE", "romanized").strip().lower()
+CAPTION_UPPERCASE = os.environ.get("CAPTION_UPPERCASE", "true").strip().lower() == "true"
+CAPTION_MAX_LINES = int(os.environ.get("CAPTION_MAX_LINES", "2"))
+CAPTION_MAX_CHARS_PER_LINE = int(os.environ.get("CAPTION_MAX_CHARS_PER_LINE", "30"))
+CAPTION_MAX_WORDS = int(os.environ.get("CAPTION_MAX_WORDS", "8"))
+CAPTION_MARGIN_BOTTOM = int(os.environ.get("CAPTION_MARGIN_BOTTOM", "280"))
 
 # --- Top Punchline / Hook Header styling (e.g. 'Khan Sir with Raj Shamani 🥰') ---
 ENABLE_TOP_PUNCHLINE = os.environ.get("ENABLE_TOP_PUNCHLINE", "true").lower() == "true"
@@ -72,8 +82,18 @@ PUNCHLINE_COLOR = os.environ.get("PUNCHLINE_COLOR", "&H00FFFFFF&")         # Cri
 PUNCHLINE_OUTLINE_COLOR = os.environ.get("PUNCHLINE_OUTLINE_COLOR", "&H00000000&")  # Solid dark outline
 
 
-# --- Motion / Zoom (Parallax Depth) ---
-ENABLE_ZOOM = os.environ.get("ENABLE_ZOOM", "false").lower() == "true"
+# --- Visual Upgrade #1A: Cinematic Composition, Color Treatment, Vignette & Micro-Motion ---
+VISUAL_CONTRAST = float(os.environ.get("VISUAL_CONTRAST", "1.05"))
+VISUAL_SATURATION = float(os.environ.get("VISUAL_SATURATION", "1.10"))
+VISUAL_BRIGHTNESS = float(os.environ.get("VISUAL_BRIGHTNESS", "0.01"))
+VISUAL_SHARPEN_AMOUNT = float(os.environ.get("VISUAL_SHARPEN_AMOUNT", "0.60"))
+VISUAL_VIGNETTE_ENABLED = os.environ.get("VISUAL_VIGNETTE_ENABLED", "true").lower() == "true"
+VISUAL_VIGNETTE_STRENGTH = float(os.environ.get("VISUAL_VIGNETTE_STRENGTH", "0.25"))
+VISUAL_MOTION_ENABLED = os.environ.get("VISUAL_MOTION_ENABLED", "true").lower() == "true"
+VISUAL_MOTION_MAX_ZOOM = float(os.environ.get("VISUAL_MOTION_MAX_ZOOM", "1.04"))
+BG_BRIGHTNESS = float(os.environ.get("BG_BRIGHTNESS", "-0.22"))
+BG_SATURATION = float(os.environ.get("BG_SATURATION", "0.95"))
+ENABLE_ZOOM = VISUAL_MOTION_ENABLED
 BG_ZOOM_SPEED = float(os.environ.get("BG_ZOOM_SPEED", "0.0008"))
 FG_ZOOM_SPEED = float(os.environ.get("FG_ZOOM_SPEED", "0.0004"))
 
