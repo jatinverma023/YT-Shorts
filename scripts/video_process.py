@@ -38,18 +38,14 @@ def get_video_dimensions(input_path: str):
         return 1920, 1080
 
 
-def build_ffmpeg_filter(input_path: str, srt_path: str):
+def build_ffmpeg_filter(input_path: str):
     width, height = get_video_dimensions(input_path)
     is_portrait = (height > width) and ((height / width) >= 1.3)
 
-    # Subtitle styling with bold font, dark outline, clean shadow, and proper margins
-    style = (
-        f"FontName={SUBTITLE_FONT},FontSize={SUBTITLE_FONT_SIZE},Bold=1,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-        "BorderStyle=1,Outline=2.5,Shadow=1,Alignment=2,MarginV=180"
-    )
-    srt_escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    subs = f"subtitles='{srt_escaped}':force_style='{style}'"
+    # Visual enhancements:
+    # 1. unsharp filter makes edges, faces, and details crisp on mobile screens
+    # 2. eq filter enhances contrast and color saturation for a vibrant, professional look
+    enhance_filter = "unsharp=5:5:0.8:5:5:0.0,eq=contrast=1.06:saturation=1.18:brightness=0.01"
 
     if is_portrait:
         # Video is already vertical (e.g. 9:16)
@@ -57,24 +53,22 @@ def build_ffmpeg_filter(input_path: str, srt_path: str):
             f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_WIDTH}:{TARGET_HEIGHT}"
         )
-        return f"{scale_crop},{subs}", False
+        return f"{scale_crop},{enhance_filter}", False
     else:
         # Video is horizontal / landscape:
-        # 1. Background: scaled to 1080x1920 with high blur & dimmed
-        # 2. Foreground: full original video uncropped in center (100% subject visible)
-        # 3. Subtitles burned cleanly below the video
+        # Background: 1080x1920 with high blur & dimmed for a sleek cinematic background
+        # Foreground: crisp original video in center with sharpening and color enhancement
         filter_complex = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,eq=brightness=-0.15[bg];"
-            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
-            f"[merged]{subs}[vout]"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,eq=brightness=-0.22:saturation=1.2[bg];"
+            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,{enhance_filter}[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vout]"
         )
         return filter_complex, True
 
 
-def process_video(input_path: str, srt_path: str, output_path: str, max_seconds=None):
-    filt, is_complex = build_ffmpeg_filter(input_path, srt_path)
+def process_video(input_path: str, output_path: str, max_seconds=None):
+    filt, is_complex = build_ffmpeg_filter(input_path)
     cmd = ["ffmpeg", "-y", "-i", input_path]
     if max_seconds:
         cmd.extend(["-t", str(max_seconds)])

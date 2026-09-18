@@ -50,21 +50,15 @@ def process_one(service, file_info):
                 name, duration, MAX_SHORT_SECONDS, MAX_SHORT_SECONDS,
             )
 
-        transcribe.extract_audio(src_path, audio_path, max_seconds=clip_duration)
-        _, detected_lang = transcribe.transcribe_to_srt(audio_path, srt_path)
-
-        video_process.process_video(src_path, srt_path, out_path, max_seconds=clip_duration)
+        # Process and enhance video with cinematic filters (no subtitles)
+        video_process.process_video(src_path, out_path, max_seconds=clip_duration)
 
         title = base.replace("_", " ").replace("-", " ").strip()[:90] + " #shorts"
-        description = (
-            f"{title}\n\nClip auto-captioned in "
-            f"{'Hindi' if detected_lang == 'hi' else 'English'}. "
-            "#shorts #podcast"
-        )
+        description = f"{title}\n\n#shorts #podcast #viral"
         youtube_url = youtube_upload.upload_short(out_path, title, description)
 
         drive_utils.move_file(service, file_id, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID)
-        sheet_log.log_run(name, "SUCCESS", detected_lang, youtube_url)
+        sheet_log.log_run(name, "SUCCESS", detected_lang="N/A", youtube_url=youtube_url)
         notify.send(f"✅ Uploaded: {name}\n{youtube_url}")
 
     except Exception as e:
