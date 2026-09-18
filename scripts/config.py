@@ -36,8 +36,8 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 MAX_SHORT_SECONDS = int(os.environ.get("MAX_SHORT_SECONDS", "59"))
-SUBTITLE_FONT = "DejaVu Sans"
-SUBTITLE_FONT_SIZE = 14         # in libass "scale" terms, tuned in video_process.py
+SUBTITLE_FONT = "Noto Sans Devanagari"
+SUBTITLE_FONT_SIZE = 20         # in libass "scale" terms, tuned in video_process.py
 
 # --- YouTube upload defaults ---
 DEFAULT_TAGS = ["shorts", "podcast", "clips"]

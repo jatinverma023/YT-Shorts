@@ -20,35 +20,77 @@ from config import TARGET_WIDTH, TARGET_HEIGHT, SUBTITLE_FONT, SUBTITLE_FONT_SIZ
 log = logging.getLogger("video_process")
 
 
-def build_ffmpeg_filter(srt_path: str) -> str:
-    # scale to cover, then crop to exact target, then burn subtitles
-    scale_crop = (
-        f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={TARGET_WIDTH}:{TARGET_HEIGHT}"
-    )
-    # libass style: white text, black outline, positioned ~15% from bottom
-    # to stay clear of Shorts UI elements.
+def get_video_dimensions(input_path: str):
+    """Return (width, height) of the video using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            input_path,
+        ]
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        parts = out.stdout.strip().split("x")
+        return int(parts[0]), int(parts[1])
+    except Exception as e:
+        log.warning("Could not probe video dimensions: %s. Defaulting to 1920x1080.", e)
+        return 1920, 1080
+
+
+def build_ffmpeg_filter(input_path: str, srt_path: str):
+    width, height = get_video_dimensions(input_path)
+    is_portrait = (height > width) and ((height / width) >= 1.3)
+
+    # Subtitle styling with bold font, dark outline, clean shadow, and proper margins
     style = (
-        f"FontName={SUBTITLE_FONT},FontSize={SUBTITLE_FONT_SIZE},"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-        "BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=180"
+        f"FontName={SUBTITLE_FONT},FontSize={SUBTITLE_FONT_SIZE},Bold=1,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
+        "BorderStyle=1,Outline=2.5,Shadow=1,Alignment=2,MarginV=180"
     )
-    # escape colons/backslashes for the filter path on all platforms
-    srt_escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:")
+    srt_escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     subs = f"subtitles='{srt_escaped}':force_style='{style}'"
-    return f"{scale_crop},{subs}"
+
+    if is_portrait:
+        # Video is already vertical (e.g. 9:16)
+        scale_crop = (
+            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT}"
+        )
+        return f"{scale_crop},{subs}", False
+    else:
+        # Video is horizontal / landscape:
+        # 1. Background: scaled to 1080x1920 with high blur & dimmed
+        # 2. Foreground: full original video uncropped in center (100% subject visible)
+        # 3. Subtitles burned cleanly below the video
+        filter_complex = (
+            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,eq=brightness=-0.15[bg];"
+            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
+            f"[merged]{subs}[vout]"
+        )
+        return filter_complex, True
 
 
 def process_video(input_path: str, srt_path: str, output_path: str, max_seconds=None):
-    vf = build_ffmpeg_filter(srt_path)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-    ]
+    filt, is_complex = build_ffmpeg_filter(input_path, srt_path)
+    cmd = ["ffmpeg", "-y", "-i", input_path]
     if max_seconds:
         cmd.extend(["-t", str(max_seconds)])
+
+    if is_complex:
+        cmd.extend([
+            "-filter_complex", filt,
+            "-map", "[vout]",
+            "-map", "0:a?",
+        ])
+    else:
+        cmd.extend([
+            "-vf", filt,
+        ])
+
     cmd.extend([
-        "-vf", vf,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         output_path,
