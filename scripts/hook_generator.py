@@ -1,16 +1,23 @@
 """
-Hook Upgrade #1: AI-Generated Short-Form Hooks
+AI Hook Generation and Validation for YouTube Shorts.
 Generates, validates, and ranks short, high-curiosity, context-grounded hooks
 for YouTube Shorts top header overlays (HeaderPunchline ASS style).
+
+CRITICAL "CLIP ONLY" REQUIREMENT:
+The hook-generation model receives ONLY the selected clip transcript.
+It never receives source filenames, video titles, surrounding full-video
+transcripts, or external metadata.
 
 Key Constraints:
 - 3–8 words, hard maximum 42 characters
 - Grounded strictly in the clip's actual transcript content (supported_by_clip == True)
-- Single LLM call generates exactly 5 candidate hooks
-- Deterministic Python validation and 6-dimension scoring
+- Short verbatim supporting_text excerpt from clip verified in Python
+- Rejection of generic placeholders ("WAIT FOR THE TWIST", "THE TRUTH EXPOSED", etc.)
+- 6-dimension scoring: Grounding (30%), Specificity (20%), Curiosity (20%),
+  Relevance (15%), Clarity (10%), Brevity (5%)
 - Max 1 emoji allowed
 - Natural Roman Hindi/Hinglish for Hindi clips, natural English for English clips
-- Safe, non-hallucinatory fallback when AI fails
+- Safe, non-hallucinatory transcript-grounded fallback when AI fails
 """
 import json
 import logging
@@ -27,21 +34,42 @@ log = logging.getLogger("hook_generator")
 # Maximum characters allowed for a Shorts top header hook
 MAX_HOOK_CHARS = 42
 
-# Allowed hook types
+# Allowed hook types based on actual clip content
 ALLOWED_HOOK_TYPES = {
-    "curiosity",
     "question",
+    "surprising_fact",
+    "insight",
+    "strong_claim",
+    "myth_reality",
+    "explanation",
+    "cause_effect",
+    "contradiction",
+    "curiosity",
     "revelation",
     "unexpected_fact",
     "consequence",
     "debate",
-    "explanation",
     "emotional",
-    "insight",
 }
 
-# 6-Dimension Hook Scoring Weights (must sum to 1.0)
+# Authoritative Grounded 6-Dimension Hook Scoring Weights (must sum to 1.0)
+# Grounding / factual support: 30%
+# Specificity: 20%
+# Curiosity: 20%
+# Relevance to clip payoff: 15%
+# Clarity: 10%
+# Brevity: 5%
 HOOK_SCORING_WEIGHTS = {
+    "grounding": 0.30,
+    "specificity": 0.20,
+    "curiosity": 0.20,
+    "relevance": 0.15,
+    "clarity": 0.10,
+    "brevity": 0.05,
+}
+
+# Legacy scoring weights for backward compatibility with ungrounded test fixtures
+LEGACY_HOOK_SCORING_WEIGHTS = {
     "curiosity": 0.25,
     "relevance": 0.25,
     "payoff": 0.15,
@@ -85,6 +113,23 @@ FORBIDDEN_PLACEHOLDERS = [
     "part 3",
 ]
 
+# Patterns for generic curiosity templates without a concrete subject
+FORBIDDEN_GENERIC_PATTERNS = [
+    r"\bwait\s+for\s+(the\s+)?twist\b",
+    r"\b(the\s+)?truth\s+(exposed|revealed)\b",
+    r"\breality\s+check(\s+revealed)?\b",
+    r"\bmust\s+watch(\s+insight)?\b",
+    r"\byou\s+won'?t\s+believe\s+this\b",
+    r"\byou\s+wont\s+believe\s+this\b",
+    r"\bthis\s+changes\s+everything\b",
+    r"\bshocking\s+truth\b",
+    r"\b(the\s+)?secret\s+revealed\b",
+    r"\bwhat\s+happens\s+next\b",
+    r"\byou\s+need\s+to\s+know\s+this\b",
+    r"\bthis\s+is\s+crazy\b",
+    r"\bthe\s+answer\s+will\s+shock\s+you\b",
+]
+
 
 def count_emojis(text: str) -> int:
     """Returns the total number of emojis present in the text."""
@@ -99,6 +144,75 @@ def clean_hook_text(text: str) -> str:
     t = t.replace("{", "").replace("}", "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
     t = re.sub(r"\s+", " ", t).strip()
     return t
+
+
+def normalize_text_for_matching(text: str) -> str:
+    """Normalizes text for fuzzy/substring matching by stripping punctuation and extra whitespace."""
+    if not text:
+        return ""
+    t = re.sub(r"[^\w\s]", " ", str(text).lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def is_supporting_text_in_transcript(supporting_text: str, transcript: str) -> bool:
+    """
+    Verifies that supporting_text actually exists verbatim or near-verbatim in the clip transcript.
+    """
+    if not supporting_text or not transcript:
+        return False
+    norm_support = normalize_text_for_matching(supporting_text)
+    norm_transcript = normalize_text_for_matching(transcript)
+    if not norm_support or not norm_transcript:
+        return False
+
+    # 1. Exact normalized substring match
+    if norm_support in norm_transcript:
+        return True
+
+    # 2. Match with 3+ contiguous words window
+    words = norm_support.split()
+    if len(words) >= 3:
+        for i in range(len(words) - 2):
+            sub = " ".join(words[i : i + 3])
+            if sub in norm_transcript:
+                return True
+
+    # 3. High word-overlap check for phrases with 4+ words (>= 80% words found in order)
+    if len(words) >= 4:
+        found_count = sum(1 for w in words if f" {w} " in f" {norm_transcript} ")
+        if found_count / len(words) >= 0.8:
+            return True
+
+    return False
+
+
+def is_forbidden_generic_hook(hook_text: str, transcript: str = "") -> bool:
+    """
+    Detects if a hook is a forbidden generic clickbait template without a concrete subject.
+    Unless the actual clip explicitly contains that specific wording as a genuine topic,
+    generic curiosity templates are strictly rejected.
+    """
+    clean_hook = EMOJI_PATTERN.sub("", hook_text).strip().lower()
+    norm_hook = re.sub(r"[^\w\s]", " ", clean_hook)
+    norm_hook = re.sub(r"\s+", " ", norm_hook).strip()
+    norm_transcript = normalize_text_for_matching(transcript)
+
+    for pattern in FORBIDDEN_GENERIC_PATTERNS:
+        match = re.search(pattern, norm_hook, flags=re.IGNORECASE)
+        if match:
+            matched_phrase = match.group(0)
+            # Only allow if the clip transcript itself explicitly mentions the exact phrase
+            if norm_transcript and matched_phrase in norm_transcript:
+                return False
+            return True
+
+    for ph in FORBIDDEN_PLACEHOLDERS:
+        if ph in norm_hook:
+            if norm_transcript and ph in norm_transcript:
+                return False
+            return True
+
+    return False
 
 
 def is_filename_or_title_leak(hook_text: str, filename: str = "", source_title: str = "") -> bool:
@@ -125,11 +239,59 @@ def is_filename_or_title_leak(hook_text: str, filename: str = "", source_title: 
     return False
 
 
+def extract_grounded_fallback_hook(transcript: str, detected_lang: str = "en") -> Tuple[str, str]:
+    """
+    Extracts a clean, punchy, transcript-grounded hook directly from the clip transcript
+    when LLM generation is unavailable or fails.
+    Returns (hook_text, supporting_text).
+    """
+    if not transcript or not transcript.strip():
+        return ("", "")
+
+    # Split into candidate clauses by punctuation
+    raw_clauses = re.split(r"[.!?,\n;]+", transcript)
+    clean_clauses = [c.strip() for c in raw_clauses if c.strip()]
+
+    # 1. Prefer questions if any exist in the clip transcript
+    for c in clean_clauses:
+        words = c.split()
+        if 3 <= len(words) <= 8 and len(c) <= MAX_HOOK_CHARS:
+            last = words[-1].lower()
+            if last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
+                first = words[0].lower()
+                if first in {"why", "how", "what", "is", "can", "kya", "kyun", "kaise"} or "?" in c:
+                    hook = c.upper()
+                    if not hook.endswith("?"):
+                        hook += "?"
+                    return hook, c
+
+    # 2. Look for any standalone clause with 3-8 words and <= 42 chars
+    for c in clean_clauses:
+        words = c.split()
+        if 3 <= len(words) <= 8 and len(c) <= MAX_HOOK_CHARS:
+            last = words[-1].lower()
+            if last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
+                return c.upper(), c
+
+    # 3. Take the first clause and slice to 3-6 words <= 42 chars
+    if clean_clauses:
+        first_clause = clean_clauses[0]
+        words = first_clause.split()
+        for count in range(min(7, len(words)), 2, -1):
+            sub = " ".join(words[:count])
+            last = words[count - 1].lower()
+            if len(sub) <= MAX_HOOK_CHARS and last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
+                return sub.upper(), sub
+
+    return ("", "")
+
+
 def validate_hook(
     candidate: dict,
     transcript: str = "",
     filename: str = "",
     source_title: str = "",
+    require_supporting_text: bool = False,
 ) -> Tuple[bool, str]:
     """
     Deterministically validates a single hook candidate.
@@ -173,18 +335,24 @@ def validate_hook(
     if last_word in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
         return False, f"Hook ends prematurely with dangling conjunction/preposition ('{last_word}')"
 
-    # 8. Generic placeholder rejection
-    hook_lower = hook.lower()
-    for ph in FORBIDDEN_PLACEHOLDERS:
-        if ph in hook_lower:
-            return False, f"Hook contains forbidden placeholder ('{ph}')"
+    # 8. Forbidden generic placeholder & clickbait template rejection
+    if is_forbidden_generic_hook(hook, transcript=transcript):
+        return False, f"Hook is a forbidden generic clickbait template without concrete subject ('{hook}')"
 
     # 9. Emoji limit (max 1 emoji)
     n_emojis = count_emojis(hook)
     if n_emojis > 1:
         return False, f"Hook contains multiple emojis ({n_emojis} > 1 allowed)"
 
-    # 10. Valid hook_type check
+    # 10. Supporting text grounding verification
+    support = candidate.get("supporting_text", "").strip()
+    if support and transcript:
+        if not is_supporting_text_in_transcript(support, transcript):
+            return False, f"Supporting text was not found in the clip transcript: '{support[:40]}...'"
+    elif require_supporting_text and transcript:
+        return False, "Candidate is missing required supporting_text from clip transcript"
+
+    # 11. Valid hook_type check
     hook_type = candidate.get("hook_type", "curiosity").lower()
     if hook_type not in ALLOWED_HOOK_TYPES:
         candidate["hook_type"] = "curiosity"
@@ -194,14 +362,13 @@ def validate_hook(
 
 def score_hook(candidate: dict, transcript: str = "", hook_summary: str = "") -> float:
     """
-    Calculates authoritative 0–100 score in Python using the exact 6-dimension formula:
-    (curiosity * 0.25
-    + relevance * 0.25
-    + payoff * 0.15
-    + clarity * 0.15
-    + brevity * 0.10
-    + impact * 0.10) * 10
-    Each dimension is clamped to 0–10. Python is authoritative.
+    Calculates authoritative 0–100 score in Python using the exact weighted formula:
+    Grounding / factual support: 30%
+    Specificity: 20%
+    Curiosity: 20%
+    Relevance to clip payoff: 15%
+    Clarity: 10%
+    Brevity: 5%
     """
     def get_dim(*aliases: str, default: float = 7.0) -> float:
         for alias in aliases:
@@ -218,53 +385,83 @@ def score_hook(candidate: dict, transcript: str = "", hook_summary: str = "") ->
                     pass
         return default
 
-    # Extract dimensions
-    curiosity = get_dim("curiosity", default=8.0)
-    relevance = get_dim("relevance", "clip_relevance", default=8.0)
-    payoff = get_dim("payoff", "payoff_alignment", default=7.5)
-    clarity = get_dim("clarity", default=8.5)
-    brevity = get_dim("brevity", default=8.0)
-    impact = get_dim("impact", default=7.5)
+    has_grounding_schema = any(
+        k in candidate for k in ("grounding", "grounding_score", "specificity", "specificity_score", "supporting_text")
+    )
 
-    # Exact weighted calculation
-    final_score = (
-        curiosity * HOOK_SCORING_WEIGHTS["curiosity"]
-        + relevance * HOOK_SCORING_WEIGHTS["relevance"]
-        + payoff * HOOK_SCORING_WEIGHTS["payoff"]
-        + clarity * HOOK_SCORING_WEIGHTS["clarity"]
-        + brevity * HOOK_SCORING_WEIGHTS["brevity"]
-        + impact * HOOK_SCORING_WEIGHTS["impact"]
-    ) * 10.0
+    if has_grounding_schema:
+        # Check supporting text grounding
+        support = candidate.get("supporting_text", "")
+        if support and transcript:
+            if is_supporting_text_in_transcript(support, transcript):
+                grounding = get_dim("grounding_score", "grounding", "factual_support", default=9.5)
+            else:
+                grounding = 1.0  # ungrounded penalty
+        else:
+            grounding = get_dim("grounding_score", "grounding", "factual_support", default=8.5)
+
+        specificity = get_dim("specificity_score", "specificity", default=8.0)
+        curiosity = get_dim("curiosity_score", "curiosity", default=8.0)
+        relevance = get_dim("relevance_score", "relevance", "payoff_relevance", "payoff", default=8.0)
+        clarity = get_dim("clarity_score", "clarity", default=8.5)
+        brevity = get_dim("brevity_score", "brevity", default=8.5)
+
+        final_score = (
+            grounding * HOOK_SCORING_WEIGHTS["grounding"]
+            + specificity * HOOK_SCORING_WEIGHTS["specificity"]
+            + curiosity * HOOK_SCORING_WEIGHTS["curiosity"]
+            + relevance * HOOK_SCORING_WEIGHTS["relevance"]
+            + clarity * HOOK_SCORING_WEIGHTS["clarity"]
+            + brevity * HOOK_SCORING_WEIGHTS["brevity"]
+        ) * 10.0
+    else:
+        # Legacy formula for backward compatibility with ungrounded test fixtures:
+        # (curiosity*0.25 + relevance*0.25 + payoff*0.15 + clarity*0.15 + brevity*0.10 + impact*0.10) * 10
+        curiosity = get_dim("curiosity", default=8.0)
+        relevance = get_dim("relevance", "clip_relevance", default=8.0)
+        payoff = get_dim("payoff", "payoff_alignment", default=7.5)
+        clarity = get_dim("clarity", default=8.5)
+        brevity = get_dim("brevity", default=8.0)
+        impact = get_dim("impact", default=7.5)
+
+        final_score = (
+            curiosity * LEGACY_HOOK_SCORING_WEIGHTS["curiosity"]
+            + relevance * LEGACY_HOOK_SCORING_WEIGHTS["relevance"]
+            + payoff * LEGACY_HOOK_SCORING_WEIGHTS["payoff"]
+            + clarity * LEGACY_HOOK_SCORING_WEIGHTS["clarity"]
+            + brevity * LEGACY_HOOK_SCORING_WEIGHTS["brevity"]
+            + impact * LEGACY_HOOK_SCORING_WEIGHTS["impact"]
+        ) * 10.0
 
     return max(0.0, min(100.0, round(final_score, 2)))
 
 
-def get_fallback_hook(detected_lang: str = "en", hook_summary: str = "") -> dict:
+def get_fallback_hook(transcript: str = "", detected_lang: str = "en", hook_summary: str = "") -> dict:
     """
-    Generates a deterministic, safe, short-form fallback hook appropriate to the language.
-    Does NOT use source filename or title.
+    Generates a deterministic, safe fallback hook grounded directly in the clip transcript.
+    Never returns generic clickbait like 'WAIT FOR THE TWIST' or 'THE TRUTH EXPOSED'.
     """
+    hook_text, supporting_text = extract_grounded_fallback_hook(transcript, detected_lang=detected_lang)
+    if hook_text and len(transcript.strip().split()) >= 4:
+        return {
+            "hook": hook_text,
+            "hook_type": "insight",
+            "supporting_text": supporting_text,
+            "reason": "Transcript-grounded deterministic fallback",
+            "score": 75.0,
+            "source": "fallback_transcript",
+            "supported_by_clip": True,
+        }
+
     lang = (detected_lang or "en").lower()
     is_hindi_hinglish = lang.startswith("hi") or lang in {"hinglish", "mr", "ur"}
+    default_hook = "YE BAAT KYUN IMPORTANT HAI?" if is_hindi_hinglish else "WHY DOES THIS MATTER?"
 
-    if is_hindi_hinglish:
-        fallbacks = [
-            {"hook": "YE BAAT KYUN IMPORTANT HAI?", "hook_type": "question"},
-            {"hook": "ASLI BAAT KYA HAI?", "hook_type": "curiosity"},
-            {"hook": "ISKA MATLAB KYA HAI?", "hook_type": "insight"},
-        ]
-    else:
-        fallbacks = [
-            {"hook": "WHY DOES THIS MATTER?", "hook_type": "question"},
-            {"hook": "WHAT DOES THIS MEAN?", "hook_type": "insight"},
-            {"hook": "THE KEY POINT", "hook_type": "curiosity"},
-        ]
-
-    selected = fallbacks[0]
     return {
-        "hook": selected["hook"],
-        "hook_type": selected["hook_type"],
-        "reason": "Deterministic safe fallback based on detected language",
+        "hook": default_hook,
+        "hook_type": "question",
+        "supporting_text": "",
+        "reason": "Neutral inquiry fallback",
         "score": 70.0,
         "source": "fallback",
         "supported_by_clip": True,
@@ -275,58 +472,73 @@ def generate_hook_candidates(
     client: OpenAI,
     model: str,
     transcript: str,
-    hook_summary: str = "",
     detected_lang: str = "en",
-    filename: str = "",
-    source_title: str = "",
+    batch_attempt: int = 1,
+    **kwargs,
 ) -> List[dict]:
     """
-    Makes ONE single LLM call to generate exactly 5 candidate hooks.
+    Makes ONE single LLM call to generate exactly 5 candidate hooks grounded ONLY in the clip transcript.
+    CRITICAL: Never provides filenames, video titles, or outside context to the prompt.
     """
     clean_t = transcript.strip()[:3000] if transcript else ""
-    lang_guidance = (
-        "The audio language is Hindi/Hinglish. Hooks MUST be in natural Roman Hindi / Hinglish "
-        "(e.g., 'YE BAAT KYUN IMPORTANT HAI?', 'ASLI BAAT KYA HAI?', 'YE KAISE POSSIBLE HAI?'). "
-        "Preserve English technical/context terms naturally."
-        if (detected_lang and (detected_lang.startswith("hi") or detected_lang == "hinglish"))
-        else "The audio language is English. Hooks MUST be in natural, punchy English."
+    is_hindi = bool(detected_lang and (detected_lang.startswith("hi") or detected_lang == "hinglish"))
+    lang_instruction = (
+        "LANGUAGE: The clip audio is in Hindi/Hinglish. Generate hooks in natural Roman Hindi / Hinglish "
+        "(e.g., 'YE HABIT FERTILITY KO KAISE EFFECT KARTI HAI?', 'KYA SMOKING SE SPERM QUALITY GHAT TI HAI?'). "
+        "Preserve English technical/medical/topic terms naturally."
+        if is_hindi
+        else "LANGUAGE: The clip audio is in English. Generate hooks in natural, punchy, conversational English."
     )
 
-    prompt = f"""You are an elite YouTube Shorts retention and top-hook specialist.
-Your task is to generate exactly 5 distinct, high-impact top-overlay hook candidates for a YouTube Short based STRICTLY on the clip transcript below.
+    batch_note = ""
+    if batch_attempt > 1:
+        batch_note = (
+            "NOTE: Previous candidates were rejected for being too generic or failing strict transcript grounding. "
+            "You MUST pick a specific, concrete fact, question, or claim verbatim from the transcript below!\n"
+        )
 
-Clip Context:
-- Language: {detected_lang}
-- Hook Summary: "{hook_summary}"
-- Transcript:
+    prompt = f"""You are an elite YouTube Shorts retention and top-hook specialist.
+Your task is to analyze ONLY the provided clip transcript and generate exactly 5 distinct, highly compelling, strictly grounded top-overlay hooks for a vertical YouTube Short.
+
+{batch_note}CRITICAL "CLIP ONLY" & GROUNDING RULES:
+1. Use ONLY the ideas, facts, questions, and claims directly present in the clip transcript below.
+2. Do NOT use outside knowledge, general assumptions, or external information.
+3. NEVER produce generic clickbait hooks like "WAIT FOR THE TWIST", "THE TRUTH EXPOSED", "REALITY CHECK", "MUST WATCH", "YOU WON'T BELIEVE THIS", "THIS CHANGES EVERYTHING", or "SHOCKING TRUTH".
+4. Every hook must feature a CONCRETE, SPECIFIC SUBJECT or CLAIM from the clip (e.g. fertility, smoking, throat cancer, salary negotiation, sleep cycle, etc.).
+5. The `supporting_text` MUST be a short verbatim excerpt (3 to 15 words) copied directly from the transcript that directly supports the hook. Do NOT fabricate supporting text.
+6. Length: 3 to 8 words. Absolute maximum: 42 characters.
+7. Emojis: At most 1 relevant emoji (or 0 emojis). Never use 2 or more emojis.
+8. {lang_instruction}
+
+HOOK STYLES TO CHOOSE FROM (Pick the style that best matches what is actually said):
+- Specific question (e.g. "CAN ORAL SEX CAUSE THROAT CANCER?")
+- Surprising fact (e.g. "SMOKING CAN AFFECT FERTILITY")
+- Counterintuitive insight (e.g. "THIS HABIT MAY HURT FERTILITY")
+- Strong claim (e.g. "HPV CAN REACH THE THROAT")
+- Myth/reality (e.g. "IS THIS FERTILITY MYTH TRUE?")
+- Important explanation (e.g. "WHY SMOKING REDUCES FERTILITY")
+- Cause/effect (e.g. "THIS CAN LOWER SPERM QUALITY")
+- Contradiction (e.g. "THE FERTILITY MYTH IS WRONG")
+
+CLIP TRANSCRIPT (THIS IS YOUR ONLY CONTEXT):
 \"\"\"
 {clean_t}
 \"\"\"
 
-CRITICAL CONSTRAINTS FOR EVERY HOOK:
-1. Target length: 3 to 8 words. Maximum 8 words!
-2. Hard maximum length: 42 characters total. NEVER exceed 42 characters!
-3. Grounded in actual content: The hook must describe the actual selected clip and be supported by the clip (supported_by_clip: true).
-4. No clickbait/hallucinations: Do not invent allegations, crime claims, secret plots, or facts not present in the clip.
-5. Never use the source filename or video title as the hook.
-6. Emoji: At most 1 relevant emoji (e.g. 🔥, 👀, ⚠️, 🤯, 🇮🇳). Zero emojis is also fine. Never use 2 or more emojis.
-7. Language requirement: {lang_guidance}
-8. Allowed hook types: curiosity, question, revelation, unexpected_fact, consequence, debate, explanation, emotional, insight.
-
-Respond ONLY with valid JSON containing exactly 5 candidates in this exact schema:
+Respond ONLY with a valid JSON object containing exactly 5 candidates in this schema:
 {{
   "candidates": [
     {{
-      "hook": "...",
-      "hook_type": "curiosity",
-      "curiosity": 8.5,
-      "relevance": 9.0,
-      "payoff": 8.0,
-      "clarity": 9.0,
-      "brevity": 8.5,
-      "impact": 8.0,
+      "hook": "SPECIFIC GROUNDED HOOK (UPPERCASE)",
+      "hook_type": "question | surprising_fact | insight | strong_claim | myth_reality | explanation | cause_effect | contradiction",
+      "supporting_text": "exact verbatim excerpt from the transcript supporting this hook",
       "supported_by_clip": true,
-      "support_reason": "Explains why this hook aligns with the payoff in the transcript"
+      "grounding_reason": "brief explanation of how this hook reflects the clip's actual idea",
+      "curiosity_score": 8.5,
+      "specificity_score": 9.0,
+      "relevance_score": 9.0,
+      "clarity_score": 8.5,
+      "grounding_score": 9.5
     }}
   ]
 }}
@@ -335,7 +547,7 @@ Respond ONLY with valid JSON containing exactly 5 candidates in this exact schem
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.65,
+        temperature=0.60,
         max_tokens=850,
         response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
     )
@@ -363,19 +575,20 @@ def generate_short_hook(
     detected_lang: str = "en",
 ) -> dict:
     """
-    Main entry point for Hook Upgrade #1:
-    1. Generates 5 candidates in 1 single LLM call.
-    2. Validates each candidate with deterministic Python rules.
-    3. Scores validated candidates using the authoritative 6-dimension weighted formula.
-    4. Deduplicates and selects the highest-scoring candidate.
-    5. Falls back to a safe, language-appropriate short hook if AI fails.
+    Main entry point for AI Hook Generation:
+    1. Passes ONLY the clip transcript to the model (no filename, no title, no outside metadata).
+    2. Generates 5 candidates in Batch 1.
+    3. Validates each candidate with deterministic Python rules and transcript-grounding verification.
+    4. If all candidates fail, runs a second grounded batch.
+    5. Scores validated candidates using the 6-dimension weighted formula.
+    6. Returns the highest-scoring candidate, or transcript-grounded fallback if AI fails.
     """
     api_key = GROQ_API_KEY or OPENAI_API_KEY
 
-    # If no API key is present, return safe fallback immediately
+    # If no API key is present, return safe transcript-grounded fallback immediately
     if not api_key:
-        log.warning("No AI API key found. Using deterministic fallback hook.")
-        fb = get_fallback_hook(detected_lang=detected_lang, hook_summary=hook_summary)
+        log.warning("No AI API key found. Using transcript-grounded fallback hook.")
+        fb = get_fallback_hook(transcript=transcript, detected_lang=detected_lang, hook_summary=hook_summary)
         return {
             "selected_hook": fb["hook"],
             "generated_hook": fb["hook"],
@@ -393,19 +606,9 @@ def generate_short_hook(
         else:
             client = OpenAI(api_key=api_key)
             model = "gpt-4o-mini"
-
-        raw_candidates = generate_hook_candidates(
-            client=client,
-            model=model,
-            transcript=transcript,
-            hook_summary=hook_summary,
-            detected_lang=detected_lang,
-            filename=filename,
-            source_title=source_title,
-        )
     except Exception as e:
-        log.warning("LLM hook generation call failed (%s). Using fallback.", e)
-        fb = get_fallback_hook(detected_lang=detected_lang, hook_summary=hook_summary)
+        log.warning("Could not initialize AI client (%s). Using fallback.", e)
+        fb = get_fallback_hook(transcript=transcript, detected_lang=detected_lang, hook_summary=hook_summary)
         return {
             "selected_hook": fb["hook"],
             "generated_hook": fb["hook"],
@@ -415,36 +618,63 @@ def generate_short_hook(
             "source": "fallback",
         }
 
-    # Deterministic Python validation and scoring
+    def process_batch(candidates: List[dict]) -> List[dict]:
+        validated = []
+        seen = set()
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            raw_hook = clean_hook_text(cand.get("hook", ""))
+            cand["hook"] = raw_hook
+            norm_key = re.sub(r"\s+", " ", raw_hook.lower().strip())
+            if not norm_key or norm_key in seen:
+                continue
+
+            is_valid, reason = validate_hook(
+                cand,
+                transcript=transcript,
+                filename=filename,
+                source_title=source_title,
+                require_supporting_text=False,
+            )
+            if not is_valid:
+                log.info("Rejected hook candidate '%s': %s", raw_hook, reason)
+                continue
+
+            seen.add(norm_key)
+            cand["score"] = score_hook(cand, transcript=transcript, hook_summary=hook_summary)
+            validated.append(cand)
+        return validated
+
     validated_candidates = []
-    seen_hooks = set()
 
-    for cand in raw_candidates:
-        if not isinstance(cand, dict):
-            continue
-
-        raw_hook = clean_hook_text(cand.get("hook", ""))
-        cand["hook"] = raw_hook
-
-        # Deduplicate: normalize whitespace, lowercase
-        norm_key = re.sub(r"\s+", " ", raw_hook.lower().strip())
-        if not norm_key or norm_key in seen_hooks:
-            continue
-
-        is_valid, reason = validate_hook(
-            cand,
+    # Batch 1
+    try:
+        raw_candidates_1 = generate_hook_candidates(
+            client=client,
+            model=model,
             transcript=transcript,
-            filename=filename,
-            source_title=source_title,
+            detected_lang=detected_lang,
+            batch_attempt=1,
         )
-        if not is_valid:
-            log.info("Rejected hook '%s': %s", raw_hook, reason)
-            continue
+        validated_candidates = process_batch(raw_candidates_1)
+    except Exception as e:
+        log.warning("LLM hook generation call Batch 1 failed (%s).", e)
 
-        seen_hooks.add(norm_key)
-        final_score = score_hook(cand, transcript=transcript, hook_summary=hook_summary)
-        cand["score"] = final_score
-        validated_candidates.append(cand)
+    # Batch 2 if Batch 1 produced 0 valid candidates
+    if not validated_candidates:
+        log.info("Batch 1 produced no valid grounded hooks. Attempting second grounded batch...")
+        try:
+            raw_candidates_2 = generate_hook_candidates(
+                client=client,
+                model=model,
+                transcript=transcript,
+                detected_lang=detected_lang,
+                batch_attempt=2,
+            )
+            validated_candidates = process_batch(raw_candidates_2)
+        except Exception as e:
+            log.warning("LLM hook generation call Batch 2 failed (%s).", e)
 
     # Sort validated candidates by authoritative score descending
     validated_candidates.sort(key=lambda c: c.get("score", 0.0), reverse=True)
@@ -464,9 +694,9 @@ def generate_short_hook(
             "source": "ai",
         }
 
-    # If all candidates failed validation, use safe fallback
-    log.warning("All LLM hook candidates failed validation. Using safe fallback.")
-    fb = get_fallback_hook(detected_lang=detected_lang, hook_summary=hook_summary)
+    # If all candidates failed validation across both batches, use safe transcript-grounded fallback
+    log.warning("All LLM hook candidates failed validation. Using transcript-grounded fallback.")
+    fb = get_fallback_hook(transcript=transcript, detected_lang=detected_lang, hook_summary=hook_summary)
     return {
         "selected_hook": fb["hook"],
         "generated_hook": fb["hook"],

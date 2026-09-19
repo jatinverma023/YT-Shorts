@@ -248,5 +248,286 @@ class TestHookGeneration(unittest.TestCase):
             self.assertIn("ASS control syntax", reason)
 
 
+class TestGroundedClipHookGeneration(unittest.TestCase):
+    """
+    Focused regression test suite for Clip-Only Grounded AI Hook Generation:
+    1. Specific factual hook generated from clip transcript.
+    2. Question hook grounded in clip.
+    3. Generic "WAIT FOR THE TWIST" rejected.
+    4. Generic "THE TRUTH EXPOSED" rejected.
+    5. Source filename cannot influence hook.
+    6. Source title cannot influence hook.
+    7. Hook supported by exact clip text passes.
+    8. Unsupported factual claim is rejected.
+    9. Supporting text not present in clip is rejected.
+    10. Outside/full-transcript information cannot be used.
+    11. Hindi/Hinglish clip produces natural Roman Hindi/Hinglish hook.
+    12. English clip produces English hook.
+    13. Generic hook cannot outrank a specific grounded hook.
+    14. Hook remains within existing length constraints.
+    15. Existing generated_hook / punchline compatibility remains intact.
+    """
+
+    def test_1_specific_factual_hook_from_clip_transcript(self):
+        """A specific factual hook supported by clip transcript passes validation."""
+        clip_transcript = "Smoking is associated with lower fertility in both men and women. We see this in clinical studies."
+        cand = {
+            "hook": "SMOKING CAN AFFECT FERTILITY",
+            "hook_type": "surprising_fact",
+            "supporting_text": "Smoking is associated with lower fertility",
+            "supported_by_clip": True,
+            "specificity_score": 9.0,
+            "grounding_score": 10.0,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertTrue(is_valid, f"Expected valid, got: {reason}")
+        score = hook_generator.score_hook(cand, transcript=clip_transcript)
+        self.assertGreaterEqual(score, 80.0)
+
+    def test_2_question_hook_grounded_in_clip(self):
+        """A specific question hook grounded in the clip passes validation."""
+        clip_transcript = "Can oral sex actually cause throat cancer? Doctors are now confirming the direct link with HPV."
+        cand = {
+            "hook": "CAN ORAL SEX CAUSE THROAT CANCER?",
+            "hook_type": "question",
+            "supporting_text": "Can oral sex actually cause throat cancer",
+            "supported_by_clip": True,
+            "specificity_score": 9.5,
+            "grounding_score": 10.0,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertTrue(is_valid, f"Expected valid question hook, got: {reason}")
+        self.assertEqual(cand["hook_type"], "question")
+
+    def test_3_generic_wait_for_the_twist_rejected(self):
+        """Generic clickbait hook 'WAIT FOR THE TWIST' is rejected."""
+        clip_transcript = "Studies on neuroplasticity demonstrate that daily meditation improves attention span."
+        cand = {
+            "hook": "WAIT FOR THE TWIST 🤯",
+            "hook_type": "curiosity",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertFalse(is_valid)
+        self.assertTrue("generic" in reason.lower() or "clickbait" in reason.lower())
+
+    def test_4_generic_the_truth_exposed_rejected(self):
+        """Generic clickbait hook 'THE TRUTH EXPOSED' is rejected."""
+        clip_transcript = "Studies on neuroplasticity demonstrate that daily meditation improves attention span."
+        cand = {
+            "hook": "THE TRUTH EXPOSED ⚠️",
+            "hook_type": "curiosity",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertFalse(is_valid)
+        self.assertTrue("generic" in reason.lower() or "clickbait" in reason.lower())
+
+    def test_5_source_filename_cannot_influence_hook(self):
+        """Hooks copying or leaking the source video filename are strictly rejected."""
+        cand = {
+            "hook": "Dr Pal on Gut Health Ep12",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(
+            cand,
+            transcript="We discuss the gut microbiome and fiber intake.",
+            filename="Dr_Pal_on_Gut_Health_Ep12.mp4",
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("copies source filename", reason)
+
+    def test_6_source_title_cannot_influence_hook(self):
+        """Hooks copying or leaking the source video title are strictly rejected."""
+        cand = {
+            "hook": "Deep Life Interview Series",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(
+            cand,
+            transcript="Today we talk about focus and time management.",
+            source_title="Deep Life Interview Series - Full Conversation",
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("copies source filename or source title", reason)
+
+    def test_7_hook_supported_by_exact_clip_text_passes(self):
+        """Hook whose supporting text matches the exact clip transcript passes."""
+        clip_transcript = "HPV virus can easily reach the throat tissues and cause cellular changes."
+        cand = {
+            "hook": "HPV CAN REACH THE THROAT",
+            "hook_type": "strong_claim",
+            "supporting_text": "HPV virus can easily reach the throat",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertTrue(is_valid, f"Expected valid, got: {reason}")
+
+    def test_8_unsupported_factual_claim_rejected(self):
+        """Hook making an unsupported factual claim absent from the clip is rejected."""
+        clip_transcript = "Smoking is associated with lower fertility in both men and women."
+        cand = {
+            "hook": "SMOKING DESTROYS YOUR DNA",
+            "hook_type": "strong_claim",
+            "supporting_text": "smoking destroys your dna",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertFalse(is_valid)
+        self.assertIn("Supporting text was not found", reason)
+
+    def test_9_supporting_text_not_present_in_clip_rejected(self):
+        """Candidate with invented supporting text not present in clip is rejected."""
+        clip_transcript = "Artificial intelligence models are optimizing compiler execution."
+        cand = {
+            "hook": "ALIENS BUILT THE PYRAMIDS",
+            "hook_type": "curiosity",
+            "supporting_text": "aliens built the ancient pyramids",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertFalse(is_valid)
+        self.assertIn("Supporting text was not found", reason)
+
+    def test_10_outside_full_transcript_information_cannot_be_used(self):
+        """
+        Information from outside the selected clip slice (e.g. from elsewhere in the full video)
+        cannot support the hook candidate.
+        """
+        # Selected clip is ONLY about deep sleep
+        clip_transcript = "Deep sleep occurs primarily during the first third of the night."
+        # Candidate referencing topic from outside the clip (e.g. real estate from later in video)
+        cand = {
+            "hook": "REAL ESTATE PRICES CRASHED",
+            "hook_type": "revelation",
+            "supporting_text": "real estate prices crashed in metro cities",
+            "supported_by_clip": True,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertFalse(is_valid)
+        self.assertIn("Supporting text was not found", reason)
+
+    def test_11_hindi_hinglish_clip_produces_natural_roman_hindi(self):
+        """Hindi/Hinglish clip produces natural Roman Hindi/Hinglish hook."""
+        clip_transcript = "Smoking se sperm quality par bahut bura asar padta hai aur fertility kam hoti hai."
+        cand = {
+            "hook": "KYA SMOKING SE FERTILITY GHAT TI HAI?",
+            "hook_type": "question",
+            "supporting_text": "Smoking se sperm quality par bahut bura asar padta hai",
+            "supported_by_clip": True,
+            "curiosity_score": 9.0,
+            "specificity_score": 9.0,
+            "grounding_score": 10.0,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertTrue(is_valid, f"Expected valid Roman Hindi hook, got: {reason}")
+        self.assertEqual(cand["hook"], "KYA SMOKING SE FERTILITY GHAT TI HAI?")
+
+    def test_12_english_clip_produces_english_hook(self):
+        """English clip produces natural English hook."""
+        clip_transcript = "Nicotine constricts the blood vessels and significantly reduces ovarian blood flow."
+        cand = {
+            "hook": "WHY SMOKING REDUCES FERTILITY",
+            "hook_type": "explanation",
+            "supporting_text": "reduces ovarian blood flow",
+            "supported_by_clip": True,
+            "curiosity_score": 9.0,
+            "specificity_score": 9.0,
+            "grounding_score": 10.0,
+        }
+        is_valid, reason = hook_generator.validate_hook(cand, transcript=clip_transcript)
+        self.assertTrue(is_valid, f"Expected valid English hook, got: {reason}")
+
+    def test_13_generic_hook_cannot_outrank_specific_grounded_hook(self):
+        """A generic dramatic hook cannot beat a specific grounded hook under the new scoring weights."""
+        clip_transcript = "Clinical studies prove that smoking lowers sperm quality significantly."
+
+        # Generic dramatic hook with high curiosity but low grounding & specificity
+        generic_cand = {
+            "hook": "YOU WON'T BELIEVE WHAT HAPPENED",
+            "curiosity_score": 10.0,
+            "grounding_score": 2.0,
+            "specificity_score": 2.0,
+            "relevance_score": 4.0,
+            "clarity_score": 7.0,
+            "brevity_score": 10.0,
+        }
+
+        # Specific grounded hook
+        grounded_cand = {
+            "hook": "THIS CAN LOWER SPERM QUALITY",
+            "supporting_text": "smoking lowers sperm quality significantly",
+            "curiosity_score": 8.5,
+            "grounding_score": 10.0,
+            "specificity_score": 9.0,
+            "relevance_score": 9.0,
+            "clarity_score": 9.5,
+            "brevity_score": 9.0,
+        }
+
+        score_generic = hook_generator.score_hook(generic_cand, transcript=clip_transcript)
+        score_grounded = hook_generator.score_hook(grounded_cand, transcript=clip_transcript)
+
+        # Grounded candidate MUST outscore the generic dramatic candidate
+        self.assertGreater(score_grounded, score_generic)
+        self.assertGreaterEqual(score_grounded, 85.0)
+        self.assertLess(score_generic, 60.0)
+
+    def test_14_hook_remains_within_length_constraints(self):
+        """Hook strictly satisfies word count (2-8 words) and character count (<= 42 chars)."""
+        # Exactly 42 characters and 8 words: valid
+        valid_edge = {
+            "hook": "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT",  # 39 chars, 8 words
+            "supported_by_clip": True,
+        }
+        self.assertTrue(hook_generator.validate_hook(valid_edge)[0])
+
+        # 43 characters: rejected
+        cand_43 = {
+            "hook": "1234567890123456789012345678901234567890123",  # 43 chars
+            "supported_by_clip": True,
+        }
+        is_val, reason = hook_generator.validate_hook(cand_43)
+        self.assertFalse(is_val)
+        self.assertIn("exceeds hard limit", reason)
+
+        # 9 words: rejected (under 42 chars)
+        cand_9_words = {
+            "hook": "a b c d e f g h i",
+            "supported_by_clip": True,
+        }
+        is_val, reason = hook_generator.validate_hook(cand_9_words)
+        self.assertFalse(is_val)
+        self.assertIn("exceeds maximum word count", reason)
+
+    def test_15_compatibility_with_generated_hook_and_punchline(self):
+        """Ensures generate_short_hook return schema maintains full backward compatibility."""
+        clip_transcript = "Sleep deprivation directly increases cortisol production and impairs glucose metabolism."
+        cand = {
+            "hook": "HOW SLEEP DEPRIVATION RAISES CORTISOL",
+            "hook_type": "explanation",
+            "supporting_text": "increases cortisol production",
+            "supported_by_clip": True,
+            "curiosity_score": 8.5,
+            "specificity_score": 9.0,
+            "grounding_score": 9.5,
+        }
+
+        with patch("hook_generator.generate_hook_candidates", return_value=[cand]):
+            with patch("hook_generator.GROQ_API_KEY", "gsk_mock"):
+                res = hook_generator.generate_short_hook(
+                    transcript=clip_transcript,
+                    filename="health_podcast.mp4",
+                    detected_lang="en",
+                )
+                self.assertIn("selected_hook", res)
+                self.assertIn("generated_hook", res)
+                self.assertEqual(res["selected_hook"], "HOW SLEEP DEPRIVATION RAISES CORTISOL")
+                self.assertEqual(res["generated_hook"], res["selected_hook"])
+                self.assertEqual(res["hook_type"], "explanation")
+                self.assertEqual(res["source"], "ai")
+
+
 if __name__ == "__main__":
     unittest.main()
+
