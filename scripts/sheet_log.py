@@ -463,6 +463,16 @@ def get_enqueued_video_ids(service=None) -> set:
     Returns the set of all unique Google Drive file IDs that have ever been enqueued in clip_queue.
     Guarantees that a long video is never duplicated or re-enqueued.
     """
+    # Defensive guard: if a Google Drive Resource or other non-Sheets service is passed by mistake,
+    # safely discard it and obtain a valid Google Sheets service.
+    if service is not None and not hasattr(service, "spreadsheets"):
+        log.warning(
+            "get_enqueued_video_ids received an invalid service object without 'spreadsheets' attribute (%s). "
+            "Falling back to default Google Sheets service.",
+            type(service),
+        )
+        service = None
+
     service = service or get_sheets_service()
     enqueued_ids = set()
     try:
@@ -475,5 +485,6 @@ def get_enqueued_video_ids(service=None) -> set:
             if row and row[0].strip():
                 enqueued_ids.add(row[0].strip())
     except Exception as e:
-        log.warning("Could not fetch enqueued video IDs from clip_queue: %s", e)
+        log.error("Could not fetch enqueued video IDs from clip_queue: %s", e)
+        raise RuntimeError(f"Could not fetch enqueued video IDs from clip_queue: {e}") from e
     return enqueued_ids

@@ -701,7 +701,18 @@ def main():
             return
 
         # Idempotency check: Filter incoming videos against all previously enqueued Drive file IDs
-        already_enqueued_ids = sheet_log.get_enqueued_video_ids(drive_service)
+        try:
+            already_enqueued_ids = sheet_log.get_enqueued_video_ids()
+        except Exception as e:
+            log.error(
+                "Could not fetch enqueued video IDs from clip_queue: %s. "
+                "Aborting discovery to prevent duplicate video processing.",
+                e,
+            )
+            if report:
+                report.add_error("sheets_check", type(e).__name__, str(e))
+                report.set_overall_status("FAILED 🔴")
+            sys.exit(1)
         unprocessed_videos = []
         for vid in incoming_videos:
             v_id = vid["id"]
