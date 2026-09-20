@@ -27,7 +27,7 @@ import video_process
 class TestAudioValidationRegression(unittest.TestCase):
     """Regression test suite for missing audio validation and failure exit propagation."""
 
-    @patch("main.process_all_clips_for_video")
+    @patch("main.process_next_pending_clip")
     @patch("notify.send")
     @patch("sheet_log.enqueue_clips")
     @patch("clip_detection.detect_clips_from_transcript")
@@ -66,7 +66,7 @@ class TestAudioValidationRegression(unittest.TestCase):
         self.assertEqual(stats["uploaded"], 1)
         self.assertEqual(stats["failed"], 0)
 
-    @patch("main.process_all_clips_for_video")
+    @patch("main.process_next_pending_clip")
     @patch("clip_detection.detect_clips_from_transcript")
     @patch("transcribe.extract_audio")
     @patch("video_process.check_has_audio", return_value=False)

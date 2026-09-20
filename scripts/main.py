@@ -36,16 +36,34 @@ log = logging.getLogger("main")
 def check_and_move_if_completed(drive_service, drive_file_id: str, video_name: str):
     """
     Checks if all clips for this source video are finished.
-    Moves the source video from Incoming to Processed ONLY when ALL generated clips are 'done' (100% success).
-    If any clip is pending, failed, or quota-waiting, the source video MUST remain in Incoming.
+    Moves the source video from Incoming to Processed ONLY when ALL generated clips are 'done' (100% success)
+    or if the video has a terminal 'no_valid_clips' status.
+    If any clip is pending, processing, failed, or quota-waiting, the source video MUST remain in Incoming.
     """
     counts = sheet_log.get_video_clip_counts(drive_file_id, service=None)
     log.info(
-        "Clip status for '%s' (ID: %s): Total: %d, Pending: %d, Done: %d, Failed: %d, QuotaWait: %d",
-        video_name, drive_file_id, counts["total"], counts["pending"], counts["done"], counts["failed"], counts.get("retry_after_quota_reset", 0),
+        "Clip status for '%s' (ID: %s): Total: %d, Pending: %d, Processing: %d, Done: %d, Failed: %d, QuotaWait: %d, NoValid: %d",
+        video_name, drive_file_id, counts["total"], counts["pending"], counts.get("processing", 0),
+        counts["done"], counts["failed"], counts.get("retry_after_quota_reset", 0), counts.get("no_valid_clips", 0),
     )
 
     report = run_report.get_current_report()
+
+    # Case 0: Terminal zero-valid-clips video (Correction #6)
+    if counts.get("no_valid_clips", 0) > 0 and counts["pending"] == 0 and counts.get("processing", 0) == 0:
+        log.info("Source video '%s' had zero valid clips. Moving to Processed folder.", video_name)
+        if report:
+            report.set_source(video_name, file_id=drive_file_id, destination="Moved to Processed (no valid clips)")
+            report.summary_source_status = "Moved to Processed (no valid clips)"
+            report.update_stage("drive_movement", "✅ Moved to Processed (no valid clips)")
+        try:
+            drive_utils.move_file(
+                drive_service, drive_file_id, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID
+            )
+        except Exception as e:
+            log.warning("Could not move zero-valid-clips video to Processed folder: %s", e)
+        return
+
     # Strictly require ALL generated clips to be completed successfully before moving to Processed
     if counts["total"] > 0 and counts["done"] == counts["total"]:
         log.info("All %d clip(s) completed successfully for '%s'. Moving source video to Processed folder.", counts["total"], video_name)
@@ -59,7 +77,7 @@ def check_and_move_if_completed(drive_service, drive_file_id: str, video_name: s
             )
         except Exception as e:
             log.warning("Could not move completed video to Processed folder: %s", e)
-    elif counts["total"] > 0 and counts["pending"] == 0 and counts.get("retry_after_quota_reset", 0) == 0 and counts["failed"] == counts["total"]:
+    elif counts["total"] > 0 and counts["pending"] == 0 and counts.get("processing", 0) == 0 and counts.get("retry_after_quota_reset", 0) == 0 and counts["failed"] == counts["total"]:
         log.warning("All clips failed for '%s'. Moving to Failed folder if configured.", video_name)
         if report:
             report.set_source(video_name, file_id=drive_file_id, destination="Moved to Failed")
@@ -74,8 +92,8 @@ def check_and_move_if_completed(drive_service, drive_file_id: str, video_name: s
                 log.warning("Could not move failed video to Failed folder: %s", e)
     else:
         log.info(
-            "Source video '%s' has incomplete clips (Total: %d, Pending: %d, Done: %d, Failed: %d). Preserving in Incoming.",
-            video_name, counts["total"], counts["pending"], counts["done"], counts["failed"]
+            "Source video '%s' has incomplete clips (Total: %d, Pending: %d, Processing: %d, Done: %d, Failed: %d). Preserving in Incoming.",
+            video_name, counts["total"], counts["pending"], counts.get("processing", 0), counts["done"], counts["failed"]
         )
         if report:
             report.set_source(video_name, file_id=drive_file_id, destination="Preserved in Incoming")
@@ -278,6 +296,79 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
                 pass
 
 
+def process_next_pending_clip(
+    drive_service,
+    row_number: int = None,
+    clip: dict = None,
+    drive_file_id: str = None,
+    video_name: str = None,
+    local_src_path: str = None,
+) -> dict:
+    """
+    STRICT ONE-CLIP PRODUCTION EXECUTION:
+    Selects, claims, and processes exactly ONE pending clip from the persistent queue:
+    1. If clip/row_number not provided, fetches the deterministic top pending clip for the active source.
+    2. Atomically/defensively claims the clip by transitioning state to 'processing'.
+    3. Executes process_queue_clip (extract, silence trim, hook gen, captions, 9:16 render, YouTube upload).
+    4. Updates final state in Google Sheets ('done' on success, 'failed' or 'retry_after_quota_reset' on error).
+    5. Checks completion of source video: moves to Processed ONLY if 100% of discovered clips are done.
+    6. Updates execution run report and returns single-clip stats.
+    STRUCTURALLY INCAPABLE of processing or uploading multiple clips in one execution.
+    """
+    if row_number is None or clip is None:
+        pending = sheet_log.get_next_pending_clip(target_drive_file_id=drive_file_id)
+        if not pending:
+            log.info("No eligible pending clips found to process.")
+            if drive_file_id and video_name:
+                check_and_move_if_completed(drive_service, drive_file_id, video_name)
+            return {"total_queued": 0, "uploaded": 0, "failed": 0, "urls": [], "errors": []}
+        row_number, clip = pending
+
+    drive_file_id = clip["drive_file_id"]
+    video_name = clip["source_video_name"]
+    clip_idx = clip["clip_index"]
+
+    # Defensive claim: transition state from 'pending' to 'processing'
+    sheet_log.claim_clip(row_number)
+    log.info("Claimed clip #%s for video '%s' (row %d) -> state: processing", clip_idx, video_name, row_number)
+
+    stats = {
+        "total_queued": 1,
+        "uploaded": 0,
+        "failed": 0,
+        "urls": [],
+        "errors": [],
+    }
+
+    try:
+        success, yt_url = process_queue_clip(drive_service, row_number, clip, local_src_path=local_src_path)
+        if success:
+            stats["uploaded"] = 1
+            if yt_url:
+                stats["urls"].append(yt_url)
+        else:
+            stats["failed"] = 1
+            stats["errors"].append(f"Clip #{clip_idx} failed")
+    except Exception as e:
+        stats["failed"] = 1
+        stats["errors"].append(str(e))
+        log.exception("Unexpected exception in process_next_pending_clip for clip #%s: %s", clip_idx, e)
+
+    # Check completion: Moves source video to Processed ONLY if 100% of discovered clips are done
+    check_and_move_if_completed(drive_service, drive_file_id, video_name)
+
+    report = run_report.get_current_report()
+    if report:
+        report.summary_total_clips = 1
+        report.summary_uploaded = stats["uploaded"]
+        report.summary_failed = stats["failed"]
+        report.summary_completed = stats["uploaded"]
+        counts = sheet_log.get_video_clip_counts(drive_file_id, service=None)
+        report.summary_pending = counts.get("pending", 0)
+
+    return stats
+
+
 def process_all_clips_for_video(drive_service, drive_file_id: str, video_name: str, local_src_path: str = None) -> dict:
     """
     Processes ALL pending clips belonging to the specified source video sequentially.
@@ -285,6 +376,8 @@ def process_all_clips_for_video(drive_service, drive_file_id: str, video_name: s
     Halts on unrecoverable failure (e.g. quota limit reached or render error), leaving
     subsequent clips pending/retryable without touching other videos.
     Only moves the source video to Processed if 100% of its clips are done.
+    PRESERVED ONLY FOR BACKWARD COMPATIBILITY / HISTORICAL UNIT TESTS.
+    UNREACHABLE FROM PRODUCTION ORCHESTRATION.
     """
     pending_clips = sheet_log.get_pending_clips_for_video(drive_file_id, service=None)
     log.info("Found %d pending clip(s) for video '%s' (ID: %s)", len(pending_clips), video_name, drive_file_id)
@@ -350,8 +443,9 @@ def process_all_clips_for_video(drive_service, drive_file_id: str, video_name: s
 def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
     """
     Downloads a new long-form video, transcribes full audio, detects multiple
-    high-engagement clips, persists them to the durable Google Sheets queue, and
-    processes ALL valid clips for this source video sequentially in the same run.
+    high-engagement talk segment clips (dynamic yield, no 5-clip cap), persists all
+    valid clips to the durable Google Sheets queue, and processes ONLY ONE clip in this initial run.
+    Remaining clips persist in Google Sheets as pending for subsequent scheduled triggers.
     """
     file_id = file_info["id"]
     name = file_info["name"]
@@ -396,9 +490,31 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
             report.update_stage("transcription", "✅ Completed (Whisper)")
             report.set_discovery(transcription_status="✅ Completed (Whisper)")
 
-        # 2. Run AI multi-clip detection
-        log.info("Detecting viral, high-retention clips from full transcript...")
-        clips = clip_detection.detect_clips_from_transcript(segments, total_duration)
+        # 2. Run AI multi-clip detection (dynamic yield: max_clips=None)
+        log.info("Detecting viral, high-retention talk segment clips from full transcript...")
+        clips = clip_detection.detect_clips_from_transcript(segments, total_duration, max_clips=None)
+
+        if not clips:
+            # ZERO VALID CLIPS TERMINAL HANDLING (Correction #6):
+            log.info("0 valid clips met quality/standalone criteria for '%s'. Marking terminal state.", name)
+            sheet_log.enqueue_zero_clips(file_id, name, reason="no_valid_clips", candidate_count=len(segments))
+            if report:
+                report.update_stage("ai_analysis", "✅ Completed")
+                report.update_stage("quality_scoring", "✅ Completed (0 qualified)")
+                report.update_stage("standalone_validation", "✅ Completed")
+                report.set_discovery(
+                    candidate_count=len(segments),
+                    qualified_count=0,
+                    filtering_results="0 clip(s) met quality/standalone criteria",
+                )
+                report.set_overall_status("NOTHING TO PROCESS 🔵")
+                report.summary_source_status = "Moved to Processed (no valid clips)"
+            notify.send(
+                f"ℹ️ Video analyzed successfully for '{name}'. No publishable standalone clips passed quality requirements."
+            )
+            check_and_move_if_completed(drive_service, file_id, name)
+            return {"total_queued": 0, "uploaded": 0, "failed": 0, "urls": [], "errors": []}
+
         if report:
             report.update_stage("ai_analysis", "✅ Completed")
             report.update_stage("quality_scoring", "✅ Completed")
@@ -416,7 +532,7 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
                     upload_status="Queued",
                 )
 
-        # 3. Persist detected clips into durable Google Sheets queue
+        # 3. Persist ALL detected clips into durable Google Sheets queue
         sheet_log.enqueue_clips(file_id, name, clips)
         if report:
             report.update_stage("sheets_update", "✅ Enqueued")
@@ -424,8 +540,9 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
             f"🎬 Discovered {len(clips)} clip(s) for '{name}' (Duration: {int(total_duration)}s). Enqueued in queue."
         )
 
-        # 4. Sequentially process ALL valid clips for this source video in the same run
-        stats = process_all_clips_for_video(drive_service, file_id, name, local_src_path=src_path)
+        # 4. STRICT ONE-CLIP PRODUCTION: Process ONLY ONE clip in this initial run!
+        # Reuses the downloaded source video locally. Remaining clips stay pending for future triggers.
+        stats = process_next_pending_clip(drive_service, drive_file_id=file_id, video_name=name, local_src_path=src_path)
         return stats
 
     except Exception as e:
@@ -621,8 +738,9 @@ def main():
         drive_service = drive_utils.get_drive_service()
         sheet_log.ensure_clip_queue_sheet()
 
-        # Step 0: Auto-reset quota-exhausted clips older than 20 hours (past YouTube midnight PT reset)
+        # Step 0: Auto-reset quota-exhausted clips older than 20 hours and stale processing workers older than 60 minutes
         sheet_log.reset_expired_quota_clips(min_age_hours=20.0)
+        sheet_log.reset_stale_processing_clips(max_age_minutes=60.0)
 
         # Step A: Check durable queue for pending clips from previous runs/batches
         while True:
@@ -648,10 +766,16 @@ def main():
                 continue
 
             log.info(
-                "Found active video with pending clips: '%s' (ID: %s). Processing all pending clips for this source in one run...",
+                "Found active video with pending clips: '%s' (ID: %s). Processing ONE pending clip...",
                 video_name, drive_file_id,
             )
-            stats = process_all_clips_for_video(drive_service, drive_file_id, video_name)
+            stats = process_next_pending_clip(
+                drive_service,
+                row_number=row_number,
+                clip=clip,
+                drive_file_id=drive_file_id,
+                video_name=video_name,
+            )
             print_run_summary(
                 videos_discovered=0,
                 videos_processed=1,

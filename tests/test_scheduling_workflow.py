@@ -160,7 +160,7 @@ class TestSchedulingWorkflow(unittest.TestCase):
         pipeline_main.main()
         mock_discover.assert_not_called()
 
-    @patch("main.process_all_clips_for_video", return_value={"total_queued": 1, "uploaded": 1, "failed": 0, "urls": []})
+    @patch("main.process_next_pending_clip", return_value={"total_queued": 1, "uploaded": 1, "failed": 0, "urls": []})
     @patch("drive_utils.get_file_metadata", return_value={"id": "f1", "trashed": False})
     @patch("sheet_log.get_next_pending_clip")
     @patch("sheet_log.reset_expired_quota_clips", return_value=0)
@@ -169,7 +169,7 @@ class TestSchedulingWorkflow(unittest.TestCase):
     @patch("drive_utils.list_new_videos")
     def test_8_pending_clips_prioritized_over_incoming(
         self, mock_list_new, mock_get_drive, mock_ensure_sheet,
-        mock_reset_quota, mock_get_pending, mock_get_meta, mock_process_all,
+        mock_reset_quota, mock_get_pending, mock_get_meta, mock_process_next,
     ):
         """Pending clips in queue are processed before scanning Incoming."""
         mock_get_pending.return_value = (
@@ -186,7 +186,7 @@ class TestSchedulingWorkflow(unittest.TestCase):
 
         pipeline_main.main()
 
-        mock_process_all.assert_called_once_with(mock_get_drive.return_value, "f1", "vid.mp4")
+        mock_process_next.assert_called_once()
         mock_list_new.assert_not_called()
 
     @patch("main.run_dry_run_inspection")

@@ -11,6 +11,7 @@ from openai import OpenAI
 from config import (
     GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL,
     MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, MAX_CLIPS_PER_VIDEO,
+    MAX_DISCOVERY_CANDIDATES,
     MIN_CLIP_QUALITY_SCORE, CLIP_OVERLAP_THRESHOLD,
     MIN_STANDALONE_SCORE,
 )
@@ -77,7 +78,7 @@ def validate_standalone_context(
         return False, "Malformed candidate data"
 
     # 1. Parse standalone_score (defaults to scores.standalone_clarity if missing)
-    raw_scores = candidate.get("scores", {})
+    raw_scores = candidate.get("quality_scores") or candidate.get("scores", {})
     if not isinstance(raw_scores, dict):
         raw_scores = {}
 
@@ -102,7 +103,12 @@ def validate_standalone_context(
         unresolved_refs = [str(unresolved_refs)] if unresolved_refs else []
 
     # 3. Deterministic opening risk check (used as supporting evidence only)
-    opening_text = str(candidate.get("hook_summary", "") or candidate.get("title_idea", ""))
+    opening_text = str(
+        candidate.get("topic_summary")
+        or candidate.get("opening_context")
+        or candidate.get("hook_summary", "")
+        or candidate.get("title_idea", "")
+    )
     risk_detected, risk_reason = check_opening_risk(opening_text)
 
     # Check all rejection conditions and collect reasons
@@ -122,7 +128,19 @@ def validate_standalone_context(
         rejection_reasons.append(f"Standalone score ({standalone_score:.1f}/10) is below threshold ({min_standalone_score:.1f})")
 
     # If an opening risk was detected AND there are unresolved references or high context dependency
-    context_dep = float(raw_scores.get("context_dependency", 0.0))
+    if "context_dependency" in raw_scores:
+        try:
+            context_dep = float(raw_scores["context_dependency"])
+        except (ValueError, TypeError):
+            context_dep = 0.0
+    elif "context_independence" in raw_scores:
+        try:
+            context_dep = 10.0 - float(raw_scores["context_independence"])
+        except (ValueError, TypeError):
+            context_dep = 0.0
+    else:
+        context_dep = 0.0
+
     if risk_detected and (unresolved_refs or context_dep >= 7.0):
         refs_detail = f" with unresolved reference(s): {', '.join(str(r) for r in unresolved_refs)}" if unresolved_refs else ""
         rejection_reasons.append(f"Context-dependent opening{refs_detail} and high context dependency ({context_dep:.1f}/10)")
@@ -216,17 +234,168 @@ def _get_llm_client():
     return OpenAI(api_key=api_key), "gpt-4o-mini"
 
 
+def _format_segments_to_lines(segments: list) -> list:
+    lines = []
+    for s in segments:
+        st = float(s.get("start", 0.0))
+        et = float(s.get("end", 0.0))
+        txt = str(s.get("text", "")).strip()
+        if txt:
+            lines.append((st, et, f"[{st:.1f}s - {et:.1f}s] {txt}"))
+    return lines
+
+
+def _split_lines_into_chunks(lines: list, max_chars: int = 14000, overlap_seconds: float = 75.0) -> list:
+    """
+    Splits transcript timestamp lines into content-aware overlapping chunks.
+    Preserves enough neighboring context across boundaries so complete talk segments
+    and payoffs can be detected without context breaks.
+    """
+    if not lines:
+        return []
+    full_text = "\n".join(item[2] for item in lines)
+    if len(full_text) <= max_chars:
+        return [lines]
+
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    i = 0
+    while i < len(lines):
+        st, et, line_str = lines[i]
+        current_chunk.append(lines[i])
+        current_len += len(line_str) + 1
+        if current_len >= max_chars:
+            chunks.append(current_chunk)
+            chunk_end_time = et
+            rollback_i = i
+            while rollback_i > 0 and (chunk_end_time - lines[rollback_i][0]) < overlap_seconds:
+                rollback_i -= 1
+            if rollback_i == i:
+                i += 1
+            else:
+                i = rollback_i + 1
+            current_chunk = []
+            current_len = 0
+        else:
+            i += 1
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
+def _detect_clips_llm(
+    client,
+    model: str,
+    transcript_text: str,
+    total_duration: float,
+    min_clip_seconds: int,
+    max_clip_seconds: int,
+) -> list:
+    """
+    Prompts the LLM to identify meaningful, coherent talk/topic segments and return
+    potential standalone Short candidates.
+    """
+    prompt = f"""You are an elite YouTube Shorts editor and conversational analyst.
+Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
+
+DISCOVERY OBJECTIVE:
+Analyze the transcript as a sequence of meaningful discussions, topics, or talks.
+A "talk segment" is a coherent portion of the conversation where the speaker is discussing ONE understandable subject, question, story, argument, explanation, experience, or insight.
+
+For each talk segment with high standalone potential, identify candidate clip boundaries ({min_clip_seconds}s to {max_clip_seconds}s) representing that conversational unit.
+
+Each Short must contain a complete micro-narrative:
+1. CONTEXT: What is being discussed? Clean, understandable setup without requiring prior 2 minutes.
+2. CORE IDEA / EXPLANATION: What is the actual point, argument, insight, or story?
+3. PAYOFF / CONCLUSION: What is the satisfying answer, surprising conclusion, or memorable punchline?
+
+CANDIDATE MOMENTS TO LOOK FOR:
+- Strong explanations, surprising facts, useful advice
+- Controversial but supported statements, personal experiences, mini-stories
+- Questions with satisfying answers, cause/effect explanations, surprising conclusions
+
+AVOID:
+- Greetings, welcomes, sponsor reads, advertisements, repeated statements
+- Incomplete answers, setup without payoff, payoff without necessary setup
+- Random sentences, clips requiring outside visual/verbal context
+
+Do NOT force a target number of clips. Return ONLY genuinely strong standalone moments. If none meet standards, return an empty list.
+
+Requirements:
+1. Each clip MUST be between {min_clip_seconds} and {max_clip_seconds} seconds long.
+2. All start and end timestamps MUST be within 0.0 and {total_duration:.1f} seconds.
+3. Standalone score (0-10): 9-10=completely understandable independently; 7-8=mostly self-contained; 5-6=some missing context; 0-4=cannot understand without outside context.
+
+Transcript:
+{transcript_text}
+
+Respond ONLY with valid JSON in this exact structure:
+{{
+  "clips": [
+    {{
+      "topic": "Why most startups fail",
+      "start": 12.5,
+      "end": 54.0,
+      "duration": 41.5,
+      "topic_summary": "Explains why morning screen time ruins focus and what to do instead.",
+      "opening_context": "Introduction of the morning habit problem.",
+      "payoff_summary": "Clear solution on dopamine reset.",
+      "title_idea": "The Morning Habit Destroying Your Brain #shorts",
+      "punchline": "Stop Ruining Your Mornings 🛑",
+      "standalone": true,
+      "standalone_score": 9.0,
+      "missing_setup": false,
+      "missing_payoff": false,
+      "critical_unresolved_reference": false,
+      "unresolved_references": [],
+      "standalone_reason": "Topic is introduced and fully resolved within the segment.",
+      "quality_scores": {{
+        "hook_strength": 9,
+        "standalone_clarity": 10,
+        "payoff_completion": 9,
+        "curiosity": 8,
+        "emotional_intellectual_impact": 8,
+        "retention_potential": 8,
+        "context_independence": 8,
+        "punchline_memorable_moment": 9
+      }},
+      "reason": "Strong standalone hook with clear setup and payoff."
+    }}
+  ]
+}}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=2000,
+            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+        )
+        content = response.choices[0].message.content.strip()
+        content = re.sub(r"^```json\s*", "", content)
+        content = re.sub(r"\s*```$", "", content)
+        data = json.loads(content)
+        return data.get("clips") or data.get("candidates", [])
+    except Exception as e:
+        log.warning("LLM detection call failed: %s", e)
+        return None
+
+
 def detect_clips_from_transcript(
     segments: list,
     total_duration: float,
     min_clip_seconds: int = MIN_CLIP_SECONDS,
     max_clip_seconds: int = MAX_CLIP_SECONDS,
-    max_clips: int = MAX_CLIPS_PER_VIDEO,
+    max_clips: int = None,
 ) -> list:
     """
-    Asks LLM to find up to `max_clips` high-engagement, standalone clips from transcript.
-    Evaluates each candidate across 8 quality dimensions and standalone context requirements,
-    using deterministic Python calculation for scoring, threshold filtering, and deduplication.
+    Analyzes full-length video transcripts using talk/topic segment detection.
+    For long videos, splits the transcript into content-aware overlapping chunks,
+    gathers potential candidates, and globally runs deterministic validation,
+    standalone gating (>=7.0), quality scoring (>=70.0), and deduplication.
+    max_clips=None yields all genuinely qualified clips dynamically without artificial limits.
     """
     total_duration = max(1.0, float(total_duration))
 
@@ -247,10 +416,14 @@ def detect_clips_from_transcript(
             "start_time": 0.0,
             "end_time": round(total_duration, 2),
             "duration": round(total_duration, 2),
+            "clip_index": 1,
+            "topic": "Full video",
+            "topic_summary": "Full video clip",
             "hook_summary": "Full video clip",
             "title_idea": "Key Highlight #shorts",
             "punchline": "Watch Till The End 🔥",
             "scores": single_scores,
+            "quality_scores": single_scores,
             "quality_score": calculate_quality_score(single_scores),
             "selection_reason": "Source video is already Short duration.",
             "standalone": True,
@@ -265,114 +438,54 @@ def detect_clips_from_transcript(
     client, model = _get_llm_client()
     if not client or not segments:
         log.warning("No LLM client or empty segments. Falling back to default initial clip.")
-        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips)
+        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
 
-    # Format transcript with timestamps
-    formatted_transcript_lines = []
-    for s in segments:
-        st = float(s.get("start", 0.0))
-        et = float(s.get("end", 0.0))
-        txt = str(s.get("text", "")).strip()
-        if txt:
-            formatted_transcript_lines.append(f"[{st:.1f}s - {et:.1f}s] {txt}")
+    lines = _format_segments_to_lines(segments)
+    if not lines:
+        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
 
-    transcript_text = "\n".join(formatted_transcript_lines)
-    # Stay within Groq free-tier rate limit (~7,000 ITPM): 16k chars is ~3,500 tokens
-    if len(transcript_text) > 16000:
-        transcript_text = transcript_text[:16000] + "\n...[transcript truncated]"
+    # Content-aware chunking for long-form video scale
+    chunks = _split_lines_into_chunks(lines, max_chars=14000, overlap_seconds=75.0)
+    all_raw_clips = []
+    any_success = False
 
-    prompt = f"""You are a master YouTube Shorts viral strategist and video editor.
-Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
-
-Your task: Identify up to {max_clips} high-quality, high-retention, STANDALONE segments suitable for YouTube Shorts.
-NOTE: {max_clips} is a MAXIMUM, NOT a requirement. Only return moments that meet high standards for a standalone Short. If only 1, 2, or 3 strong moments exist, return ONLY those. Do NOT manufacture weak candidates to fill a quota.
-
-Requirements:
-1. Each clip MUST be between {min_clip_seconds} and {max_clip_seconds} seconds long (end_time - start_time >= {min_clip_seconds} and <= {max_clip_seconds}).
-2. All start_time and end_time values MUST be within 0.0 and {total_duration:.1f} seconds.
-3. STANDALONE & CONTEXT VALIDATION (MANDATORY):
-   - The clip must make complete sense on its own without requiring the viewer to have watched the original long-form video.
-   - Missing setup: If a clip starts mid-thought or depends on an unseen prior question, statement, or missing context (e.g. "And that's why he decided to leave", "Yes, absolutely", "As I said earlier"), flag missing_setup=true.
-   - Missing payoff: If a clip cuts off abruptly before the explanation, story climax, punchline, or resolution (e.g. "So when he opened the box..."), flag missing_payoff=true.
-   - Unresolved references: Normal pronouns (he, she, they, it) that are established and understandable INSIDE the clip are completely fine. Only flag critical_unresolved_reference=true if essential pronouns or terms have no context inside the clip and leave the viewer confused.
-   - Standalone score (0–10): 9-10=completely understandable independently; 7-8=mostly self-contained; 5-6=some missing context; 0-4=cannot understand without outside context.
-4. HOOK QUALITY: Must start with an immediate reason to keep watching (unexpected question, surprising fact, strong claim, emotional statement, or story setup). Must be faithful to the actual transcript — NEVER invent facts.
-5. PAYOFF / COMPLETION: Must have a meaningful resolution (setup -> explanation -> conclusion, question -> answer, or claim -> surprising result). Penalize ending mid-sentence or before the key payoff.
-6. RETENTION POTENTIAL: Evaluate natural narrative momentum and information payoff. Do NOT predict view counts or numerical virality.
-7. EVALUATE EACH CANDIDATE on the following 8 dimensions (0–10 scale):
-   - hook_strength: (0-10, higher is better)
-   - standalone_clarity: (0-10, higher is better)
-   - payoff: (0-10, higher is better)
-   - curiosity: (0-10, higher is better)
-   - impact: (0-10, emotional/intellectual resonance, higher is better)
-   - retention: (0-10, pacing & engagement, higher is better)
-   - context_dependency: (0-10, HIGHER means MORE DEPENDENT on missing context, which is bad)
-   - punchline_score: (0-10, strength of final memorable takeaway, higher is better)
-
-Transcript:
-{transcript_text}
-
-Respond ONLY with valid JSON in this exact structure:
-{{
-  "clips": [
-    {{
-      "start_time": 12.5,
-      "end_time": 54.0,
-      "hook_summary": "Explains why morning screen time ruins focus and what to do instead.",
-      "title_idea": "The Morning Habit Destroying Your Brain #shorts",
-      "punchline": "Stop Ruining Your Mornings 🛑",
-      "standalone": true,
-      "standalone_score": 9.0,
-      "missing_setup": false,
-      "missing_payoff": false,
-      "critical_unresolved_reference": false,
-      "unresolved_references": [],
-      "standalone_reason": "Topic is introduced and fully resolved within the segment.",
-      "scores": {{
-        "hook_strength": 9,
-        "standalone_clarity": 10,
-        "payoff": 9,
-        "curiosity": 8,
-        "impact": 8,
-        "retention": 9,
-        "context_dependency": 2,
-        "punchline_score": 9
-      }},
-      "selection_reason": "Strong standalone hook with clear setup and payoff."
-    }}
-  ]
-}}
-"""
-
-    try:
-        response = client.chat.completions.create(
+    for chunk in chunks:
+        chunk_text = "\n".join(item[2] for item in chunk)
+        raw_chunk_clips = _detect_clips_llm(
+            client=client,
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=1500,
-            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+            transcript_text=chunk_text,
+            total_duration=total_duration,
+            min_clip_seconds=min_clip_seconds,
+            max_clip_seconds=max_clip_seconds,
         )
-        content = response.choices[0].message.content.strip()
-        content = re.sub(r"^```json\s*", "", content)
-        content = re.sub(r"\s*```$", "", content)
-        data = json.loads(content)
-        raw_clips = data.get("clips") or data.get("candidates", [])
-        validated = _validate_and_filter_clips(
-            raw_clips, total_duration, min_clip_seconds, max_clip_seconds, max_clips
-        )
-        if validated:
-            log.info("Successfully detected and scored %d high-retention clips.", len(validated))
-            return validated
-        elif raw_clips:
-            log.info(
-                "AI suggested %d candidate(s), but none met the quality/standalone threshold or survived deduplication. Returning empty list.",
-                len(raw_clips),
-            )
-            return []
-    except Exception as e:
-        log.warning("AI clip detection failed: %s. Using fallback clips.", e)
+        if raw_chunk_clips is not None:
+            any_success = True
+            all_raw_clips.extend(raw_chunk_clips)
 
-    return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips)
+    if not any_success:
+        log.warning("AI clip detection failed across all transcript chunks. Using fallback clips.")
+        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
+
+    # Globally run quality filtering, standalone validation, and deduplication across all chunks
+    validated = _validate_and_filter_clips(
+        all_raw_clips,
+        total_duration,
+        min_clip_seconds,
+        max_clip_seconds,
+        max_clips=max_clips,
+    )
+    if validated:
+        log.info("Successfully detected and scored %d high-retention clips.", len(validated))
+        return validated
+    elif all_raw_clips:
+        log.info(
+            "AI suggested %d candidate(s), but none met the quality/standalone threshold or survived deduplication. Returning empty list.",
+            len(all_raw_clips),
+        )
+        return []
+
+    return []
 
 
 def _is_similar_summary(summary1: str, summary2: str, threshold: float = 0.60) -> bool:
@@ -402,7 +515,7 @@ def _validate_and_filter_clips(
     total_duration: float,
     min_clip_seconds: int,
     max_clip_seconds: int,
-    max_clips: int,
+    max_clips: int = None,
     min_quality_score: float = MIN_CLIP_QUALITY_SCORE,
     overlap_threshold: float = CLIP_OVERLAP_THRESHOLD,
     min_standalone_score: float = MIN_STANDALONE_SCORE,
@@ -410,23 +523,32 @@ def _validate_and_filter_clips(
     """
     Validates candidate boundaries, enforces standalone/context validation gate,
     calculates deterministic Python quality scores, filters below quality threshold,
-    deduplicates temporal & semantic overlaps, and returns top candidates ranked by
-    quality score (max_clips limit).
+    deduplicates temporal & semantic overlaps, and returns top candidates.
+    If max_clips is None, preserves all valid candidates up to MAX_DISCOVERY_CANDIDATES.
+    Assigns stable clip_index in chronological order.
     """
     candidates = []
 
     for item in raw_clips:
         try:
-            start = float(item.get("start_time", 0.0))
-            end = float(item.get("end_time", 0.0))
-            summary = str(item.get("hook_summary") or item.get("summary") or item.get("hook") or "").strip() or "Key moment from video"
-            title = str(item.get("title_idea") or item.get("title") or "").strip() or "Must Watch Insight #shorts"
+            start = float(item.get("start") if item.get("start") is not None else item.get("start_time", 0.0))
+            end = float(item.get("end") if item.get("end") is not None else item.get("end_time", 0.0))
+            topic = str(item.get("topic") or "").strip()
+            summary = str(
+                item.get("topic_summary")
+                or item.get("hook_summary")
+                or item.get("summary")
+                or topic
+                or item.get("hook")
+                or ""
+            ).strip() or "Key moment from video"
+            title = str(item.get("title_idea") or item.get("title") or "").strip() or (f"{topic} #shorts" if topic else "Must Watch Insight #shorts")
             punchline = str(item.get("punchline", "")).strip().strip('"').strip("'").replace("{", "").replace("}", "")[:60]
             if not punchline:
                 clean_t = re.sub(r"#shorts", "", title, flags=re.IGNORECASE).strip()
                 punchline = f"{clean_t[:45]} ✨" if clean_t else "Watch Till The End 🔥"
-            selection_reason = str(item.get("selection_reason", "")).strip()
-            raw_scores = item.get("scores", {})
+            selection_reason = str(item.get("selection_reason") or item.get("reason") or "").strip()
+            raw_scores = item.get("quality_scores") or item.get("scores") or {}
             if not isinstance(raw_scores, dict):
                 raw_scores = {}
         except (ValueError, TypeError):
@@ -441,7 +563,6 @@ def _validate_and_filter_clips(
 
         duration = end - start
         if duration < min_clip_seconds:
-            # If slightly short, try extending end if within total_duration
             if start + min_clip_seconds <= total_duration:
                 end = start + min_clip_seconds
                 duration = end - start
@@ -452,7 +573,7 @@ def _validate_and_filter_clips(
             end = start + max_clip_seconds
             duration = max_clip_seconds
 
-        # 1. Standalone / Context validation gate (Fix #4)
+        # 1. Standalone / Context validation gate
         is_standalone, standalone_reason = validate_standalone_context(
             item, min_standalone_score=min_standalone_score
         )
@@ -463,20 +584,33 @@ def _validate_and_filter_clips(
             )
             continue
 
-        # 2. Authoritative Python calculation for quality_score (LLM score is untrusted)
-        calculated_quality = calculate_quality_score(raw_scores)
+        # Context dependency vs independence mapping
+        if "context_dependency" in raw_scores:
+            try:
+                c_dep = float(raw_scores["context_dependency"])
+            except (ValueError, TypeError):
+                c_dep = 5.0
+        elif "context_independence" in raw_scores:
+            try:
+                c_dep = 10.0 - float(raw_scores["context_independence"])
+            except (ValueError, TypeError):
+                c_dep = 5.0
+        else:
+            c_dep = 5.0
 
-        # Clean individual score fields
         scores_cleaned = {
             "hook_strength": max(0.0, min(10.0, float(raw_scores.get("hook_strength", 5.0)))),
             "standalone_clarity": max(0.0, min(10.0, float(raw_scores.get("standalone_clarity", 5.0)))),
-            "payoff": max(0.0, min(10.0, float(raw_scores.get("payoff", 5.0)))),
+            "payoff": max(0.0, min(10.0, float(raw_scores.get("payoff_completion", raw_scores.get("payoff", 5.0))))),
             "curiosity": max(0.0, min(10.0, float(raw_scores.get("curiosity", 5.0)))),
-            "impact": max(0.0, min(10.0, float(raw_scores.get("impact", 5.0)))),
-            "retention": max(0.0, min(10.0, float(raw_scores.get("retention", 5.0)))),
-            "context_dependency": max(0.0, min(10.0, float(raw_scores.get("context_dependency", 5.0)))),
-            "punchline_score": max(0.0, min(10.0, float(raw_scores.get("punchline_score", raw_scores.get("punchline", 5.0))))),
+            "impact": max(0.0, min(10.0, float(raw_scores.get("emotional_intellectual_impact", raw_scores.get("impact", 5.0))))),
+            "retention": max(0.0, min(10.0, float(raw_scores.get("retention_potential", raw_scores.get("retention", 5.0))))),
+            "context_dependency": max(0.0, min(10.0, c_dep)),
+            "punchline_score": max(0.0, min(10.0, float(raw_scores.get("punchline_memorable_moment", raw_scores.get("punchline_score", raw_scores.get("punchline", 5.0)))))),
         }
+
+        # 2. Authoritative Python calculation for quality_score (LLM score is untrusted)
+        calculated_quality = calculate_quality_score(scores_cleaned)
 
         # 3. Filter out candidates below the minimum quality score threshold
         if calculated_quality < min_quality_score:
@@ -490,10 +624,13 @@ def _validate_and_filter_clips(
             "start_time": round(start, 2),
             "end_time": round(end, 2),
             "duration": round(duration, 2),
+            "topic": topic,
+            "topic_summary": summary,
             "hook_summary": summary,
             "title_idea": title,
             "punchline": punchline,
             "scores": scores_cleaned,
+            "quality_scores": scores_cleaned,
             "quality_score": calculated_quality,
             "selection_reason": selection_reason or standalone_reason,
             "standalone": True,
@@ -543,8 +680,15 @@ def _validate_and_filter_clips(
         if not has_conflict:
             accepted.append(cand)
 
-        if len(accepted) >= max_clips:
+        if max_clips is not None and len(accepted) >= max_clips:
             break
+        elif max_clips is None and len(accepted) >= MAX_DISCOVERY_CANDIDATES:
+            break
+
+    # Preserve stable discovery identity: chronological clip_index
+    chrono_sorted = sorted(accepted, key=lambda x: (x["start_time"], x["end_time"]))
+    for idx, cand in enumerate(chrono_sorted, start=1):
+        cand["clip_index"] = idx
 
     return accepted
 
