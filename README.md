@@ -407,18 +407,11 @@ Visual assets and reference screenshots are organized in [`docs/screenshots/`](d
 ![Google Drive Folders](docs/screenshots/google-drive.png)
 *Google Drive file organization showing source video ingestion in Incoming and archival in Processed.*
 
-| View | Asset Reference | Status | Description |
-|---|:---:|:---:|---|
-| **Pipeline Workflow** | [`docs/screenshots/github-actions.png`](docs/screenshots/github-actions.png) | ✅ Live | GitHub Actions runner showing automated triggers, cron history, and run logs |
-| **Durable Queue** | [`docs/screenshots/google-sheets-queue.png`](docs/screenshots/google-sheets-queue.png) | ✅ Live | Google Sheets `clip_queue` tab tracking clip state machine |
-| **Drive Folders** | [`docs/screenshots/google-drive.png`](docs/screenshots/google-drive.png) | ✅ Live | Source video preservation in `Incoming` and archival in `Processed` |
-| **Execution Logs** | `docs/screenshots/pipeline-logs.png` | ⏳ Pending | Terminal output showing stage banners and timing metrics |
-| **Finished Short** | `docs/screenshots/youtube-short.png` | ⏳ Pending | High-definition 1080×1920 mobile Short playback |
-| **AI Metadata** | `docs/screenshots/metadata.png` | ⏳ Pending | YouTube Studio view of generated title, description, and tags |
-| **Caption Styling** | `docs/screenshots/caption-rendering.png` | ⏳ Pending | Close-up of animated word karaoke and top punchline header |
-| **Canvas Layout** | `docs/screenshots/before-after.png` | ⏳ Pending | Split comparison of horizontal 16:9 source vs. vertical 9:16 Short |
-
-> Refer to [`docs/screenshots/README.md`](docs/screenshots/README.md) for instructions on capturing and sanitizing the remaining screenshots before adding them.
+| View | Asset Reference | Description |
+|---|:---:|---|
+| **Pipeline Workflow** | [`docs/screenshots/github-actions.png`](docs/screenshots/github-actions.png) | GitHub Actions runner showing automated triggers, cron history, and run logs |
+| **Durable Queue** | [`docs/screenshots/google-sheets-queue.png`](docs/screenshots/google-sheets-queue.png) | Google Sheets `clip_queue` tab tracking clip state machine |
+| **Drive Folders** | [`docs/screenshots/google-drive.png`](docs/screenshots/google-drive.png) | Source video preservation in `Incoming` and archival in `Processed` |
 
 ---
 

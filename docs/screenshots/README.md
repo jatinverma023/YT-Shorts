@@ -6,16 +6,11 @@ This directory stores visual assets and production screenshots for the YouTube S
 
 To maintain a professional, production-grade presentation without compromising security, please follow these guidelines when adding screenshots:
 
-| File | Target View | Sanitization Instructions |
+| File | Target View | Description |
 |---|---|---|
-| `github-actions.png` | GitHub Actions workflow runs tab | Ensure repository secrets and private account IDs are hidden. |
-| `google-sheets-queue.png` | Google Sheets `clip_queue` tab showing state transitions | Hide spreadsheet ID, channel email, and sensitive sheet URLs. |
-| `google-drive.png` | Google Drive folder view (`Incoming` / `Processed`) | Mask folder ID in the URL bar and any private personal file names. |
-| `pipeline-logs.png` | Pipeline terminal / execution logs showing run banners | Mask API keys (Groq, OpenAI, Google) and OAuth tokens. |
-| `youtube-short.png` | Final rendered YouTube Short playback | Clean preview of the rendered vertical layout on mobile or desktop. |
-| `metadata.png` | YouTube Studio video details page | Showcase the AI-generated Title, Description, and Hashtags. |
-| `caption-rendering.png` | Close-up of animated karaoke ASS captions & Top Hook | Illustrate the dual-overlay layout and Romanized captions. |
-| `before-after.png` | Split comparison: landscape 16:9 source vs. vertical 9:16 Short | Highlights full-canvas composition and foreground scaling. |
+| [`github-actions.png`](github-actions.png) | GitHub Actions workflow runs tab | Demonstrates automated 3-slot cron executions and manual dispatch runs. |
+| [`google-sheets-queue.png`](google-sheets-queue.png) | Google Sheets `clip_queue` tab | Illustrates the durable state machine across `pending`, `processing`, and `done`. |
+| [`google-drive.png`](google-drive.png) | Google Drive folders view | Displays source video ingestion in `Incoming` and completed video archival in `Processed`. |
 
 ## Privacy & Security Checklist
 
