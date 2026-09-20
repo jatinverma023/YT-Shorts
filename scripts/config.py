@@ -127,3 +127,13 @@ DRY_RUN_LOG_ONLY = os.environ.get("DRY_RUN_LOG_ONLY", "false").strip().lower() =
 
 WORKDIR = os.environ.get("WORKDIR", "/tmp/shorts_pipeline")
 
+# --- YouTube Metadata Generation (Title, Description, Hashtags) ---
+MIN_TITLE_QUALITY_SCORE = float(os.environ.get("MIN_TITLE_QUALITY_SCORE", "70.0"))
+TITLE_MIN_WORDS = int(os.environ.get("TITLE_MIN_WORDS", "5"))
+TITLE_MAX_WORDS = int(os.environ.get("TITLE_MAX_WORDS", "12"))
+TITLE_MAX_LENGTH = int(os.environ.get("TITLE_MAX_LENGTH", "70"))
+MAX_TITLE_CANDIDATES = int(os.environ.get("MAX_TITLE_CANDIDATES", "5"))
+MIN_HASHTAGS = int(os.environ.get("MIN_HASHTAGS", "4"))
+MAX_HASHTAGS = int(os.environ.get("MAX_HASHTAGS", "6"))
+
+
