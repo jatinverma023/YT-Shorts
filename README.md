@@ -399,11 +399,19 @@ Visual assets and reference screenshots are organized in [`docs/screenshots/`](d
 ![GitHub Actions Workflow Runs](docs/screenshots/github-actions.png)
 *Automated GitHub Actions runner history showing scheduled publication slots and manual triggers.*
 
+### Google Sheets Durable Queue
+![Google Sheets Clip Queue](docs/screenshots/google-sheets-queue.png)
+*Google Sheets persistent queue tracking clip state machine across pending, processing, and done statuses.*
+
+### Google Drive Ingestion & Archival
+![Google Drive Folders](docs/screenshots/google-drive.png)
+*Google Drive file organization showing source video ingestion in Incoming and archival in Processed.*
+
 | View | Asset Reference | Status | Description |
 |---|:---:|:---:|---|
 | **Pipeline Workflow** | [`docs/screenshots/github-actions.png`](docs/screenshots/github-actions.png) | ✅ Live | GitHub Actions runner showing automated triggers, cron history, and run logs |
-| **Durable Queue** | `docs/screenshots/google-sheets-queue.png` | ⏳ Pending | Google Sheets `clip_queue` tab tracking clip state machine |
-| **Drive Folders** | `docs/screenshots/google-drive.png` | ⏳ Pending | Source video preservation in `Incoming` and archival in `Processed` |
+| **Durable Queue** | [`docs/screenshots/google-sheets-queue.png`](docs/screenshots/google-sheets-queue.png) | ✅ Live | Google Sheets `clip_queue` tab tracking clip state machine |
+| **Drive Folders** | [`docs/screenshots/google-drive.png`](docs/screenshots/google-drive.png) | ✅ Live | Source video preservation in `Incoming` and archival in `Processed` |
 | **Execution Logs** | `docs/screenshots/pipeline-logs.png` | ⏳ Pending | Terminal output showing stage banners and timing metrics |
 | **Finished Short** | `docs/screenshots/youtube-short.png` | ⏳ Pending | High-definition 1080×1920 mobile Short playback |
 | **AI Metadata** | `docs/screenshots/metadata.png` | ⏳ Pending | YouTube Studio view of generated title, description, and tags |
