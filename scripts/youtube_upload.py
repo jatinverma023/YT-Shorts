@@ -118,12 +118,18 @@ def find_existing_short(clip_identifier: str = None, title: str = None, client=N
     return None
 
 
-def upload_short(video_path: str, title: str, description: str, tags=None, clip_identifier: str = None):
+def upload_short(video_path: str, title: str, description: str, tags=None, clip_identifier: str = None, hashtags=None):
     youtube = get_youtube_client()
 
     final_desc = description
+    if hashtags:
+        for ht in hashtags:
+            ht_str = str(ht).strip()
+            if ht_str and ht_str not in final_desc:
+                final_desc = f"{final_desc} {ht_str}".strip()
+
     if clip_identifier and f"[id:{clip_identifier}]" not in final_desc:
-        final_desc = f"{description}\n\n[id:{clip_identifier}]".strip()
+        final_desc = f"{final_desc}\n\n[id:{clip_identifier}]".strip()
 
     final_tags = list(tags or DEFAULT_TAGS)
     if clip_identifier and clip_identifier not in final_tags:

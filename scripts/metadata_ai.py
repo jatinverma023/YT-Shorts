@@ -1269,6 +1269,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
             "hook_strategy": "fallback",
             "title_strategy": "fallback",
             "description_strategy": "fallback",
+            "is_fallback": True,
         }
 
     # Initialize client (Groq or OpenAI)
@@ -1283,7 +1284,6 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
         client = OpenAI(api_key=api_key)
         model = chat_model or "gpt-4o-mini"
 
-    # Context transcript strictly limited to selected clip
     # Context transcript strictly limited to selected clip
     context_transcript = transcript.strip()[:3500] if transcript else clean_filename_fallback(filename)
 
@@ -1377,10 +1377,21 @@ Respond ONLY with valid JSON in this exact structure:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.6,
-                max_tokens=1000,
+                max_tokens=2200,
                 response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
             )
-            content = response.choices[0].message.content.strip()
+            choice = response.choices[0] if (response and getattr(response, "choices", None)) else None
+            if not choice:
+                raise ValueError("Empty choices list in AI metadata response")
+
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason == "length":
+                raise ValueError("AI metadata response was truncated due to token limit (finish_reason='length')")
+
+            content = choice.message.content.strip() if choice.message and getattr(choice.message, "content", None) else ""
+            if not content:
+                raise ValueError("Empty message content in AI metadata response")
+
             data = extract_json_payload(content)
             if data and isinstance(data, dict):
                 log.info("Successfully received and parsed AI metadata response on attempt %d.", attempt)
@@ -1421,6 +1432,7 @@ Respond ONLY with valid JSON in this exact structure:
             "hook_strategy": "fallback",
             "title_strategy": "fallback",
             "description_strategy": "fallback",
+            "is_fallback": True,
         }
 
     # Check if response is a legacy payload (e.g. from test_successful_ai_metadata_response which tests title_1)
@@ -1476,6 +1488,7 @@ Respond ONLY with valid JSON in this exact structure:
             "hook_strategy": "legacy",
             "title_strategy": "legacy",
             "description_strategy": "legacy",
+            "is_fallback": False,
         }
 
     # --- Modern Package-Level Pipeline ---
@@ -1660,6 +1673,7 @@ Respond ONLY with valid JSON in this exact structure:
         "hook_strategy": hook_strategy,
         "title_strategy": title_strategy,
         "description_strategy": desc_strategy,
+        "is_fallback": False if best_pkg else True,
     }
 
 

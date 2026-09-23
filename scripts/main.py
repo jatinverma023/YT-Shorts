@@ -174,7 +174,7 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
             slice_path, words, tightened_path
         )
 
-        # 6. Generate metadata & determine punchline hook grounded in this clip's transcript
+        # 6. Generate unified, transcript-grounded content packaging (hook, title, description, hashtags)
         meta = metadata_ai.generate_shorts_metadata(
             f"{base_name} Part {clip_index}",
             transcript=clip_transcript,
@@ -183,21 +183,37 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
         variants = meta.get("title_variants", [title, title, title])
         description = meta["description"]
         tags = meta["tags"]
+        hashtags = meta.get("hashtags", [])
+        pkg_score = meta.get("package_quality_score", 0.0)
 
-        # Hook Upgrade #1: Ensure top hook is a dedicated, validated short-form hook grounded in clip transcript
-        candidate_punchline = clip.get("punchline") or meta.get("punchline") or clip.get("hook_summary", "")
-        cand_dict = {"hook": candidate_punchline, "hook_type": "curiosity"}
+        # Consistent Hook: The hook used for burned video overlay and the package hook must be identical
+        # Priority: unified package hook from metadata_ai -> durable queue punchline -> dedicated hook generator
+        package_hook = meta.get("generated_hook") or meta.get("punchline") or ""
+        cand_dict = {"hook": package_hook, "hook_type": meta.get("hook_strategy", "curiosity")}
         is_valid, _ = hook_generator.validate_hook(cand_dict, transcript=clip_transcript, filename=video_name)
-        if is_valid:
+
+        if is_valid and not meta.get("is_fallback", False):
+            punchline = cand_dict["hook"]
+        elif is_valid and not clip.get("punchline"):
             punchline = cand_dict["hook"]
         else:
-            hook_res = hook_generator.generate_short_hook(
-                transcript=clip_transcript,
-                hook_summary=clip.get("hook_summary", ""),
-                filename=video_name,
-                detected_lang=detected_lang,
-            )
-            punchline = hook_res["selected_hook"]
+            candidate_punchline = clip.get("punchline") or package_hook or clip.get("hook_summary", "")
+            cand_dict_alt = {"hook": candidate_punchline, "hook_type": "curiosity"}
+            is_valid_alt, _ = hook_generator.validate_hook(cand_dict_alt, transcript=clip_transcript, filename=video_name)
+            if is_valid_alt and candidate_punchline:
+                punchline = cand_dict_alt["hook"]
+            else:
+                hook_res = hook_generator.generate_short_hook(
+                    transcript=clip_transcript,
+                    hook_summary=clip.get("hook_summary", ""),
+                    filename=video_name,
+                    detected_lang=detected_lang,
+                )
+                punchline = hook_res["selected_hook"]
+
+        # Ensure consistent punchline/generated_hook backward-compatible representation
+        meta["punchline"] = punchline
+        meta["generated_hook"] = punchline
 
         # 7. Generate animated, pop/karaoke word-level ASS captions with top punchline hook
         clip_duration = video_process.get_duration_seconds(active_video)
@@ -221,14 +237,17 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
         else:
             # 9. Upload to YouTube Shorts with tracking clip_identifier
             youtube_url = youtube_upload.upload_short(
-                out_path, title, description, tags=tags, clip_identifier=clip_identifier
+                out_path, title, description, tags=tags, clip_identifier=clip_identifier, hashtags=hashtags
             )
 
         # 10. Mark clip as done in durable queue and log run
         sheet_log.update_clip_status(row_number, "done", youtube_url=youtube_url)
+        v1 = variants[0] if len(variants) > 0 else title
+        v2 = variants[1] if len(variants) > 1 else v1
+        v3 = variants[2] if len(variants) > 2 else v1
         sheet_log.log_run(
             video_name, "SUCCESS", detected_lang=detected_lang, youtube_url=youtube_url,
-            title_1=variants[0], title_2=variants[1], title_3=variants[2],
+            title_1=v1, title_2=v2, title_3=v3,
         )
         notify.send(
             f"✅ Uploaded Short ({video_name} Clip #{clip_index}):\n{title}\n💬 Hook: {punchline}\n{youtube_url}"
@@ -244,10 +263,11 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
                 clip_index,
                 hook=punchline,
                 hook_status="Validated",
-                metadata_status="AI Generated",
+                metadata_status="AI Generated" if not meta.get("is_fallback") else "Fallback",
                 rendering_status="Rendered (1080x1920)",
                 upload_status="Uploaded",
                 youtube_url=youtube_url,
+                package_quality_score=pkg_score,
             )
         return True, youtube_url
 
@@ -629,7 +649,7 @@ def run_dry_run_inspection(drive_service=None, target_video_path: str = None):
             title = meta["title"]
             variants = meta.get("title_variants", [title, title, title])
 
-            punchline = clip.get("punchline") or meta.get("punchline", "")
+            punchline = (meta.get("generated_hook") or meta.get("punchline") if not meta.get("is_fallback") else None) or clip.get("punchline") or meta.get("punchline", "")
 
             clip_report = {
                 "clip_index": idx,
