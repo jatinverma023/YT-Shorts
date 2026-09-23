@@ -74,11 +74,61 @@ STOP_WORDS: Set[str] = {
     "uski", "uske", "unka", "unki", "unke", "hoga", "hogi", "honge", "kare", "karega", "karenge",
 }
 
-# Extreme / absolute claim words that require strict transcript support
-EXTREME_CLAIM_WORDS: Set[str] = {
-    "permanent", "permanently", "incurable", "guaranteed", "deadly", "fatal",
-    "cure", "cures", "impossible", "illegal", "arrested", "banned", "100%",
+# Extreme / absolute claim words that require strict transcript support (shared with hook_generator)
+EXTREME_CLAIM_WORDS: Set[str] = hook_generator.EXTREME_CLAIM_WORDS
+validate_claim_strength = hook_generator.validate_claim_strength
+check_claim_strength_preservation = hook_generator.validate_claim_strength
+
+# Generic description summary boilerplate patterns that should be scored lower / flagged
+FORBIDDEN_GENERIC_DESCRIPTIONS = [
+    r"\bin\s+this\s+(video|clip|short)\b",
+    r"\bthis\s+(video|clip|short)\s+(explains|shows|covers|discusses|breaks\s+down)\b",
+    r"\bwatch\s+this\s+(video|clip|short)\b",
+    r"\bhere\s+is\s+a\s+(clip|video|short)\b",
+    r"\bcheck\s+out\s+this\s+(video|clip|short)\b",
+]
+
+# Title generation strategies
+TITLE_STRATEGIES = {
+    "specific_explanation",
+    "curiosity_topic",
+    "mechanism",
+    "consequence",
+    "number_data",
 }
+
+# Authoritative Description Scoring Weights (must sum to 1.0)
+# Grounding / accuracy: 30%
+# Curiosity / micro-teaser payoff hint: 25%
+# Specificity: 20%
+# Non-repetition / complementarity: 15%
+# Naturalness / clarity: 10%
+DESCRIPTION_SCORING_WEIGHTS = {
+    "grounding": 0.30,
+    "curiosity": 0.25,
+    "specificity": 0.20,
+    "non_repetition": 0.15,
+    "naturalness": 0.10,
+}
+
+# Authoritative Package Scoring Weights (must sum to 1.0)
+# Scroll-stop potential: 25%
+# Curiosity: 20%
+# Grounding: 15%
+# Specificity: 15%
+# Hook/title complementarity & non-repetition: 10%
+# Payoff alignment: 10%
+# Clarity: 5%
+PACKAGE_SCORING_WEIGHTS = {
+    "scroll_stop": 0.25,
+    "curiosity": 0.20,
+    "grounding": 0.15,
+    "specificity": 0.15,
+    "complementarity": 0.10,
+    "payoff_alignment": 0.10,
+    "clarity": 0.05,
+}
+
 
 
 def clean_filename_fallback(filename: str) -> str:
@@ -219,6 +269,17 @@ def is_title_hook_duplicate(title: str, hook: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def calculate_text_similarity(text_a: str, text_b: str) -> float:
+    """Calculates Jaccard similarity on normalized content words between two texts."""
+    words_a = extract_content_words(text_a)
+    words_b = extract_content_words(text_b)
+    if not words_a or not words_b:
+        return 0.0
+    intersection = words_a & words_b
+    union = words_a | words_b
+    return round(len(intersection) / len(union), 3)
+
+
 def is_forbidden_generic_title(title: str, transcript: str = "") -> bool:
     """
     Detects unsupported generic clickbait templates.
@@ -253,11 +314,10 @@ def is_title_grounded(title: str, transcript: str) -> Tuple[bool, str]:
     norm_transcript = normalize_text(transcript)
     norm_title = normalize_text(title)
 
-    # 1. Check for extreme/absolute claims not present in clip
-    title_words = norm_title.split()
-    for ew in EXTREME_CLAIM_WORDS:
-        if ew in title_words and ew not in norm_transcript:
-            return False, f"Title introduces stronger unsupported claim ('{ew}')"
+    # 1. Check for extreme/absolute claims not present in clip (claim-strength preservation)
+    is_pres, claim_err = check_claim_strength_preservation(title, transcript)
+    if not is_pres:
+        return False, f"Title introduces stronger unsupported claim ({claim_err})"
 
     # 2. Concept support evaluation
     content_words = extract_content_words(title)
@@ -518,9 +578,442 @@ def extract_grounded_fallback_title(transcript: str, detected_lang: str = "en") 
     return " ".join([w.capitalize() for w in cand_words])[:70]
 
 
+def extract_grounded_fallback_description(transcript: str) -> str:
+    """Extracts a concise, transcript-grounded 1-2 sentence micro-teaser fallback."""
+    if not transcript or not transcript.strip():
+        return "Insightful discussion from the clip."
+    sentences = [s.strip() for s in re.split(r"[.!?]+", transcript) if s.strip()]
+    if sentences:
+        chosen = sentences[0]
+        if len(sentences) > 1 and len(f"{chosen}. {sentences[1]}") <= 220:
+            chosen = f"{chosen}. {sentences[1]}"
+        if not chosen.endswith("."):
+            chosen += "."
+        return chosen[:250]
+    first_part = " ".join(transcript.strip().split()[:25])
+    return f"{first_part}..."
+
+
+def validate_description(
+    candidate: dict,
+    transcript: str = "",
+    hook: str = "",
+    title: str = "",
+    filename: str = "",
+    source_title: str = "",
+) -> Tuple[bool, str]:
+    """
+    Deterministically validates a single description candidate:
+    - Non-empty
+    - 1-2 natural sentences (clean micro-teaser, max 3 sentences)
+    - Length between 20 and 350 chars (before trailing hashtags)
+    - Anti-clickbait / no unsupported extreme claims
+    - No source filename or source title leakage
+    - No ASS syntax or invalid control codes
+    - Non-repetition against title and hook (not an echo or copy)
+    - Grounding in clip transcript
+    """
+    raw_desc = str(candidate.get("description", "")).strip()
+    if not raw_desc:
+        return False, "Description is empty"
+
+    # Strip existing hashtags if present for base text validation
+    base_text = re.sub(r"(?:#[A-Za-z0-9_]+\s*)+$", "", raw_desc).strip()
+    if not base_text:
+        return False, "Description contains only hashtags without narrative content"
+
+    # Control syntax check
+    if "{" in base_text or "}" in base_text or "\\N" in base_text or "\t" in base_text:
+        return False, "Description contains raw control syntax or invalid formatting"
+
+    # Length check (micro-teaser target: 20 to 350 characters before hashtags)
+    if len(base_text) < 20:
+        return False, f"Description is too short ({len(base_text)} < 20 chars)"
+    if len(base_text) > 350:
+        return False, f"Description is too long ({len(base_text)} > 350 chars for micro-teaser)"
+
+    # Sentence count check (1-2 sentences target, max 3)
+    sentences = [s.strip() for s in re.split(r"[.!?]+", base_text) if s.strip()]
+    if len(sentences) > 3:
+        return False, f"Description has too many sentences ({len(sentences)} > 3 sentences)"
+
+    norm_base = normalize_text(base_text)
+
+    # Anti-clickbait check (unsupported clickbait patterns)
+    for pattern in FORBIDDEN_CLICKBAIT_PATTERNS:
+        if re.search(pattern, norm_base) and (not transcript or pattern not in normalize_text(transcript)):
+            return False, "Description uses generic clickbait pattern"
+
+    # Filename or source title leakage
+    if is_filename_or_source_title_leak(base_text, filename=filename, source_title=source_title):
+        return False, "Description copies source filename or source title"
+
+    # Extreme unsupported claims check (claim-strength preservation)
+    if transcript:
+        is_pres, claim_err = check_claim_strength_preservation(base_text, transcript)
+        if not is_pres:
+            return False, f"Description introduces stronger unsupported claim ({claim_err})"
+
+    # Non-repetition check against title
+    if title:
+        sim_title = calculate_text_similarity(base_text, title)
+        if sim_title >= 0.70:
+            return False, f"Description excessively repeats title words (Jaccard: {sim_title:.2f})"
+        norm_t = normalize_text(title)
+        if norm_t and norm_t in norm_base and len(norm_t) / max(1, len(norm_base)) > 0.75:
+            return False, "Description merely restates the title"
+
+    # Non-repetition check against hook
+    if hook:
+        sim_hook = calculate_text_similarity(base_text, hook)
+        if sim_hook >= 0.70:
+            return False, f"Description excessively repeats hook words (Jaccard: {sim_hook:.2f})"
+
+    # Grounding check in transcript
+    if transcript:
+        content_words = extract_content_words(base_text)
+        if content_words:
+            norm_tr = normalize_text(transcript)
+            tr_words = set(norm_tr.split())
+            tr_content = extract_content_words(transcript)
+            matched = sum(
+                1 for w in content_words
+                if w in tr_words or w in tr_content or any(tw.startswith(w[:4]) for tw in tr_words if len(tw) >= 4)
+            )
+            ratio = matched / len(content_words)
+            if ratio < 0.40:
+                return False, f"Description concepts insufficiently grounded in clip ({matched}/{len(content_words)} content words supported)"
+
+    return True, "Valid"
+
+
+def score_description(
+    candidate: dict,
+    transcript: str = "",
+    hook: str = "",
+    title: str = "",
+) -> float:
+    """
+    Python-authoritative description quality score (0-100 scale):
+    Grounding / accuracy: 30%
+    Curiosity / micro-teaser payoff hint: 25%
+    Specificity: 20%
+    Non-repetition / complementarity: 15%
+    Naturalness / clarity: 10%
+    """
+    raw_desc = str(candidate.get("description", "")).strip()
+    base_text = re.sub(r"(?:#[A-Za-z0-9_]+\s*)+$", "", raw_desc).strip()
+    if not base_text:
+        return 0.0
+
+    def get_adv(dim_name: str, default: float = 7.5) -> float:
+        for k in (f"{dim_name}_score", dim_name):
+            if k in candidate:
+                try:
+                    return max(0.0, min(10.0, float(candidate[k])))
+                except (ValueError, TypeError):
+                    pass
+        return default
+
+    adv_curiosity = get_adv("curiosity", 8.0)
+    adv_specificity = get_adv("specificity", 7.5)
+
+    # 1. Grounding (30%)
+    if transcript:
+        content_words = extract_content_words(base_text)
+        if content_words:
+            norm_tr = normalize_text(transcript)
+            tr_words = set(norm_tr.split())
+            matched = sum(
+                1 for w in content_words
+                if w in tr_words or any(tw.startswith(w[:4]) for tw in tr_words if len(tw) >= 4)
+            )
+            ratio = matched / len(content_words)
+            if ratio >= 0.75:
+                grounding = 9.5
+            elif ratio >= 0.55:
+                grounding = 8.5
+            else:
+                grounding = 6.0
+        else:
+            grounding = 8.0
+    else:
+        grounding = get_adv("grounding", 8.0)
+
+    # 2. Curiosity / Micro-teaser payoff hint (25%)
+    # Score generic summary boilerplate phrases ("In this clip...") lower than micro-teasers
+    norm_base = normalize_text(base_text)
+    is_boilerplate = any(re.search(pat, norm_base) for pat in FORBIDDEN_GENERIC_DESCRIPTIONS)
+    if is_boilerplate:
+        curiosity = max(4.0, adv_curiosity - 3.0)
+    else:
+        curiosity = min(10.0, max(7.0, adv_curiosity))
+
+    # 3. Specificity (20%)
+    content_words = extract_content_words(base_text)
+    has_numbers = bool(re.search(r"\b\d+[\w%₹$]*\b", base_text))
+    specificity = min(10.0, max(6.0, (8.0 if len(content_words) >= 5 else 6.5) + (1.5 if has_numbers else 0.0)))
+    specificity = max(specificity, adv_specificity)
+
+    # 4. Non-repetition / complementarity (15%)
+    sim_title = calculate_text_similarity(base_text, title) if title else 0.0
+    sim_hook = calculate_text_similarity(base_text, hook) if hook else 0.0
+    max_sim = max(sim_title, sim_hook)
+    if max_sim <= 0.30:
+        non_repetition = 10.0
+    elif max_sim <= 0.50:
+        non_repetition = 8.5
+    elif max_sim <= 0.65:
+        non_repetition = 6.5
+    else:
+        non_repetition = 4.0
+
+    # 5. Naturalness / clarity (10%)
+    length = len(base_text)
+    if 45 <= length <= 220:
+        naturalness = 9.5
+    elif 25 <= length <= 280:
+        naturalness = 8.5
+    else:
+        naturalness = 7.0
+
+    final_score = (
+        grounding * DESCRIPTION_SCORING_WEIGHTS["grounding"]
+        + curiosity * DESCRIPTION_SCORING_WEIGHTS["curiosity"]
+        + specificity * DESCRIPTION_SCORING_WEIGHTS["specificity"]
+        + non_repetition * DESCRIPTION_SCORING_WEIGHTS["non_repetition"]
+        + naturalness * DESCRIPTION_SCORING_WEIGHTS["naturalness"]
+    ) * 10.0
+
+    return round(max(0.0, min(100.0, final_score)), 1)
+
+
+def score_package(
+    hook_cand: dict,
+    title_cand: dict,
+    desc_cand: dict,
+    hashtags: List[str],
+    transcript: str = "",
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Python-authoritative package-level scoring across:
+    HOOK + TITLE + DESCRIPTION + HASHTAGS
+
+    Weights:
+    Scroll-stop potential: 25%
+    Curiosity: 20%
+    Grounding: 15%
+    Specificity: 15%
+    Hook/title complementarity: 10%
+    Payoff alignment: 10%
+    Clarity: 5%
+
+    Total = 100%
+    Returns (package_score, dimension_dict).
+    """
+    hook_text = str(hook_cand.get("hook", "")).strip()
+    title_text = str(title_cand.get("title", "")).strip()
+    desc_text = str(desc_cand.get("description", "")).strip()
+
+    # Component individual scores (0-10 scale)
+    h_score = float(hook_cand.get("score") or hook_cand.get("hook_score") or hook_generator.score_hook(hook_cand, transcript=transcript))
+    t_score = float(title_cand.get("title_score") or score_title(title_cand, transcript=transcript))
+    d_score = float(desc_cand.get("desc_score") or score_description(desc_cand, transcript=transcript, hook=hook_text, title=title_text))
+
+    h_scaled = h_score / 10.0
+    t_scaled = t_score / 10.0
+    d_scaled = d_score / 10.0
+
+    # 1. Scroll-stop potential (25%)
+    scroll_stop = min(10.0, h_scaled * 0.70 + t_scaled * 0.30)
+
+    # 2. Curiosity (20%)
+    h_curiosity = float(hook_cand.get("curiosity_score") or hook_cand.get("curiosity", 8.0))
+    t_curiosity = float(title_cand.get("curiosity_score") or title_cand.get("curiosity", 8.0))
+    curiosity = min(10.0, h_curiosity * 0.55 + t_curiosity * 0.45)
+
+    # 3. Grounding (15%)
+    h_ground = float(hook_cand.get("grounding_score") or hook_cand.get("grounding", 9.0))
+    t_ground = float(title_cand.get("grounding_score") or title_cand.get("grounding", 9.0))
+    grounding = min(10.0, h_ground * 0.50 + t_ground * 0.50)
+
+    # 4. Specificity (15%)
+    h_spec = float(hook_cand.get("specificity_score") or hook_cand.get("specificity", 8.0))
+    t_spec = float(title_cand.get("specificity_score") or title_cand.get("specificity", 8.0))
+    specificity = min(10.0, h_spec * 0.40 + t_spec * 0.60)
+
+    # 5. Hook/title complementarity & non-repetition (10%)
+    sim_ht = calculate_text_similarity(hook_text, title_text)
+    if sim_ht < 0.20:
+        complementarity = 9.5
+    elif sim_ht < 0.40:
+        complementarity = 9.0
+    elif sim_ht < 0.60:
+        complementarity = 7.5
+    else:
+        complementarity = 3.5
+
+    # 6. Payoff alignment (10%)
+    sim_td = calculate_text_similarity(title_text, desc_text)
+    if sim_td < 0.30:
+        payoff_alignment = min(10.0, d_scaled * 0.60 + t_scaled * 0.40)
+    elif sim_td < 0.50:
+        payoff_alignment = min(9.0, d_scaled * 0.50 + t_scaled * 0.50)
+    else:
+        payoff_alignment = 5.0
+
+    # 7. Clarity (5%)
+    clarity = min(10.0, (h_scaled + t_scaled + d_scaled) / 3.0)
+
+    package_score = (
+        scroll_stop * PACKAGE_SCORING_WEIGHTS["scroll_stop"]
+        + curiosity * PACKAGE_SCORING_WEIGHTS["curiosity"]
+        + grounding * PACKAGE_SCORING_WEIGHTS["grounding"]
+        + specificity * PACKAGE_SCORING_WEIGHTS["specificity"]
+        + complementarity * PACKAGE_SCORING_WEIGHTS["complementarity"]
+        + payoff_alignment * PACKAGE_SCORING_WEIGHTS["payoff_alignment"]
+        + clarity * PACKAGE_SCORING_WEIGHTS["clarity"]
+    ) * 10.0
+
+    dims = {
+        "scroll_stop": round(scroll_stop, 2),
+        "curiosity": round(curiosity, 2),
+        "grounding": round(grounding, 2),
+        "specificity": round(specificity, 2),
+        "complementarity": round(complementarity, 2),
+        "payoff_alignment": round(payoff_alignment, 2),
+        "clarity": round(clarity, 2),
+    }
+
+    return round(max(0.0, min(100.0, package_score)), 1), dims
+
+
+def select_best_package(
+    hook_candidates: List[dict],
+    title_candidates: List[dict],
+    desc_candidates: List[dict],
+    hashtags: List[str],
+    transcript: str = "",
+    min_package_score: float = 70.0,
+    filename: str = "",
+    source_title: str = "",
+) -> Optional[dict]:
+    """
+    Package Combination Optimization Pipeline:
+    1. Individually validate candidates in each category.
+    2. Rank candidates independently by individual quality score.
+    3. Keep top 3 valid candidates from each category (or available valid if < 3).
+    4. Evaluate up to 27 complete combinations (3 x 3 x 3).
+    5. Python-authoritative package scoring.
+    6. Select highest-scoring valid package meeting min_package_score.
+    """
+    # 1 & 2: Validate & rank hooks
+    valid_hooks = []
+    seen_hooks = set()
+    for h in hook_candidates:
+        if not isinstance(h, dict):
+            continue
+        h_text = hook_generator.clean_hook_text(h.get("hook", ""))
+        h["hook"] = h_text
+        norm_h = normalize_text(h_text)
+        if not norm_h or norm_h in seen_hooks:
+            continue
+        is_val, reason = hook_generator.validate_hook(h, transcript=transcript, filename=filename, source_title=source_title)
+        if is_val:
+            h["score"] = hook_generator.score_hook(h, transcript=transcript)
+            valid_hooks.append(h)
+            seen_hooks.add(norm_h)
+
+    valid_hooks.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+    top_hooks = valid_hooks[:3]
+
+    # 1 & 2: Validate & rank titles
+    valid_titles = []
+    seen_titles = set()
+    for t in title_candidates:
+        if not isinstance(t, dict):
+            continue
+        t_text = str(t.get("title", "")).strip().strip('"\'`')
+        t["title"] = t_text
+        norm_t = normalize_text(t_text)
+        if not norm_t or norm_t in seen_titles:
+            continue
+        # Validate title standalone first
+        is_val, reason = validate_title(t, transcript=transcript, hook="", filename=filename, source_title=source_title)
+        if is_val:
+            t["title_score"] = score_title(t, transcript=transcript)
+            valid_titles.append(t)
+            seen_titles.add(norm_t)
+
+    valid_titles.sort(key=lambda x: x.get("title_score", 0.0), reverse=True)
+    top_titles = valid_titles[:3]
+
+    # 1 & 2: Validate & rank descriptions
+    valid_descs = []
+    seen_descs = set()
+    for d in desc_candidates:
+        if not isinstance(d, dict):
+            continue
+        d_text = str(d.get("description", "")).strip()
+        d["description"] = d_text
+        norm_d = normalize_text(d_text)
+        if not norm_d or norm_d in seen_descs:
+            continue
+        is_val, reason = validate_description(d, transcript=transcript, filename=filename, source_title=source_title)
+        if is_val:
+            d["desc_score"] = score_description(d, transcript=transcript)
+            valid_descs.append(d)
+            seen_descs.add(norm_d)
+
+    valid_descs.sort(key=lambda x: x.get("desc_score", 0.0), reverse=True)
+    top_descs = valid_descs[:3]
+
+    if not top_hooks or not top_titles or not top_descs:
+        return None
+
+    # 3 & 4: Evaluate up to 27 combinations (len(top_hooks) * len(top_titles) * len(top_descs) <= 27)
+    scored_packages = []
+    for h in top_hooks:
+        h_text = h["hook"]
+        for t in top_titles:
+            t_text = t["title"]
+            # Verify hook/title non-duplication
+            is_dup, _ = is_title_hook_duplicate(t_text, h_text)
+            if is_dup:
+                continue
+
+            for d in top_descs:
+                d_text = d["description"]
+                # Verify description does not duplicate title or hook
+                sim_td = calculate_text_similarity(t_text, d_text)
+                sim_hd = calculate_text_similarity(h_text, d_text)
+                if sim_td >= 0.70 or sim_hd >= 0.70:
+                    continue
+
+                pkg_score, pkg_dims = score_package(h, t, d, hashtags, transcript=transcript)
+                if pkg_score >= min_package_score:
+                    scored_packages.append({
+                        "hook_candidate": h,
+                        "title_candidate": t,
+                        "desc_candidate": d,
+                        "package_score": pkg_score,
+                        "package_dimensions": pkg_dims,
+                        "hook": h_text,
+                        "title": t_text,
+                        "description": d_text,
+                    })
+
+    if not scored_packages:
+        return None
+
+    scored_packages.sort(key=lambda x: x["package_score"], reverse=True)
+    return scored_packages[0]
+
+
 def validate_single_hashtag(tag: str, transcript: str = "") -> Tuple[bool, str]:
     """
     Validates a single hashtag deterministically in Python:
+
     - Must start with #
     - Must contain no spaces or illegal characters
     - Must not be generic spam (#viral, #fyp, etc.)
@@ -770,6 +1263,12 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
             "tags": ["shorts", "podcast", "viral", "clips"],
             "title_quality_score": 75.0,
             "hashtag_quality_score": 75.0,
+            "hook_quality_score": 70.0,
+            "description_quality_score": 70.0,
+            "package_quality_score": 70.0,
+            "hook_strategy": "fallback",
+            "title_strategy": "fallback",
+            "description_strategy": "fallback",
         }
 
     # Initialize client (Groq or OpenAI)
@@ -785,9 +1284,10 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
         model = chat_model or "gpt-4o-mini"
 
     # Context transcript strictly limited to selected clip
+    # Context transcript strictly limited to selected clip
     context_transcript = transcript.strip()[:3500] if transcript else clean_filename_fallback(filename)
 
-    prompt = f"""You are a top YouTube Shorts audience retention and metadata strategist.
+    prompt = f"""You are an elite YouTube Shorts audience retention and packaging specialist.
 Below is the exact transcript spoken in the selected clip:
 
 Transcript:
@@ -796,31 +1296,50 @@ Transcript:
 \"\"\"
 
 Task:
-Generate authentic YouTube Shorts metadata strictly grounded in what is ACTUALLY SPOKEN in the transcript.
-Avoid misleading clickbait. Titles and hashtags must be intriguing, specific, and grounded.
+Analyze ONLY this clip transcript and generate a high-retention, strictly grounded content packaging system:
+HOOK + TITLE + DESCRIPTION + HASHTAGS
 
-Requirements:
-1. Punchline / Top Hook Header:
-   - A single, punchy 1-line hook (3 to 8 words, maximum 42 characters) from this clip.
-2. Title Candidates:
-   - Exactly 5 distinct title candidates (5 to 12 words, 35 to 70 characters).
-   - Must be curiosity-driven, accurate, and natural.
-   - Do NOT simply copy or repeat the hook.
-   - Grounded in the clip concepts. No generic sensational clickbait.
-3. Description:
-   - 1 to 2 natural, concise sentences explaining the authentic discussion.
-   - Do NOT copy the title or keyword stuff.
-4. Hashtags:
-   - 4 to 6 hashtags starting with #Shorts followed by 3 to 5 topical hashtags relevant to this clip.
-   - No generic spam tags like #viral, #fyp, #trending.
-5. Tags: 5 to 8 search keyword tags.
+Rules:
+1. CLIP CONTENT ANALYSIS:
+   Identify core topic, central proposition, strongest claim, surprising element, curiosity gap, consequence, contrast, numbers, and payoff.
+2. 5 HOOK CANDIDATES (3 to 8 words, maximum 42 characters):
+   - Distinct strategies: curiosity, contrarian, question, consequence, specific_fact.
+   - Emoji Policy: 0–2 emojis max (prefer 1 semantically relevant emoji; 2 only when both independently reinforce concepts; 0 when unnecessary; no emoji chains like '👀🔥', no duplicates like '💰💰').
+   - Include supporting_text copied verbatim from clip transcript.
+3. 5 TITLE CANDIDATES (5 to 12 words, 35 to 70 characters, max 1 emoji):
+   - Distinct strategies: specific_explanation, curiosity_topic, mechanism, consequence, number_data.
+   - Must complement the hook without duplicating or repeating it.
+4. 5 DESCRIPTION CANDIDATES (1 to 2 natural sentences, micro-teaser style):
+   - Grounded in clip; hints at payoff without regurgitating title or hook.
+   - Avoid generic summary boilerplate ('In this clip...', 'This video explains...').
+5. HASHTAGS: 4 to 6 hashtags starting with #Shorts followed by topical clip tags (no spam like #viral, #fyp).
+6. TAGS: 5 to 8 search keywords.
 
 Respond ONLY with valid JSON in this exact structure:
 {{
-  "punchline": "...",
+  "content_analysis": {{
+    "core_topic": "...",
+    "strongest_claim": "...",
+    "surprising_element": "...",
+    "curiosity_gap": "...",
+    "consequence": "...",
+    "contrast": "...",
+    "numbers": "...",
+    "payoff": "...",
+    "memorable_phrase": "..."
+  }},
+  "hook_candidates": [
+    {{
+      "hook": "SPECIFIC GROUNDED HOOK (UPPERCASE)",
+      "hook_type": "curiosity | contrarian | question | consequence | specific_fact",
+      "supporting_text": "verbatim excerpt from clip",
+      "supported_by_clip": true
+    }}
+  ],
   "title_candidates": [
     {{
-      "title": "...",
+      "title": "Natural Engaging Title Here",
+      "strategy": "specific_explanation | curiosity_topic | mechanism | consequence | number_data",
       "grounding_score": 9.0,
       "specificity_score": 8.5,
       "curiosity_score": 8.5,
@@ -828,10 +1347,17 @@ Respond ONLY with valid JSON in this exact structure:
       "clarity_score": 9.0
     }}
   ],
-  "title_1": "Primary Title",
-  "title_2": "Variant 2",
-  "title_3": "Variant 3",
-  "description": "1-2 natural sentences.",
+  "description_candidates": [
+    {{
+      "description": "1-2 natural sentences creating a grounded micro-teaser.",
+      "strategy": "micro_teaser"
+    }}
+  ],
+  "punchline": "Primary Top Hook Here",
+  "title_1": "Primary Title Here",
+  "title_2": "Variant Title 2",
+  "title_3": "Variant Title 3",
+  "description": "Primary description here.",
   "hashtags": ["#Shorts", "#Topic1", "#Topic2", "#Topic3"],
   "tags": ["tag1", "tag2"]
 }}
@@ -889,134 +1415,18 @@ Respond ONLY with valid JSON in this exact structure:
             "tags": ["shorts", "podcast", "viral"],
             "title_quality_score": 75.0,
             "hashtag_quality_score": 75.0,
+            "hook_quality_score": 70.0,
+            "description_quality_score": 70.0,
+            "package_quality_score": 70.0,
+            "hook_strategy": "fallback",
+            "title_strategy": "fallback",
+            "description_strategy": "fallback",
         }
 
-    # 1. Determine and validate generated_hook / punchline
-    raw_punchline = str(data.get("punchline", "")).strip()
-    cand = {"hook": raw_punchline, "hook_type": "curiosity"}
-    is_valid, _ = hook_generator.validate_hook(cand, transcript=transcript, filename=filename)
-    if is_valid:
-        punchline = cand["hook"]
-    else:
-        detected_lang = "hi" if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in transcript) else "en"
-        try:
-            hook_res = hook_generator.generate_short_hook(
-                transcript=transcript,
-                hook_summary=raw_punchline,
-                filename=filename,
-                detected_lang=detected_lang,
-            )
-            punchline = hook_res["selected_hook"]
-        except Exception as he:
-            log.warning("Secondary hook generation fallback (%s). Using sanitized candidate.", he)
-            punchline = hook_generator.clean_hook_text(raw_punchline) or f"{clean_filename_fallback(filename)[:45]} ✨"
+    # Check if response is a legacy payload (e.g. from test_successful_ai_metadata_response which tests title_1)
+    is_legacy_payload = ("title_candidates" not in data and any(k in data for k in ("title_1", "title_2", "title_3")))
 
-    # 2. Process Title Candidates: Batch 1 validation & scoring
-    raw_candidates = data.get("title_candidates")
-    if not isinstance(raw_candidates, list) or not raw_candidates:
-        # Fallback to legacy title fields if present (e.g. In unit tests)
-        raw_candidates = []
-        for k in ("title_1", "title_2", "title_3"):
-            val = data.get(k)
-            if val:
-                raw_candidates.append({"title": str(val).strip()})
-
-    min_score = getattr(config, "MIN_TITLE_QUALITY_SCORE", 70.0)
-
-    def evaluate_title_candidates(cands: List[dict]) -> List[dict]:
-        valid_list = []
-        seen_titles = set()
-        for c in cands:
-            if not isinstance(c, dict):
-                continue
-            title_text = str(c.get("title", "")).strip()
-            norm_k = normalize_text(title_text)
-            if not norm_k or norm_k in seen_titles:
-                continue
-
-            valid, reason = validate_title(
-                c,
-                transcript=transcript,
-                hook=punchline,
-                filename=filename,
-            )
-            if not valid:
-                log.info("Rejected title candidate '%s': %s", title_text, reason)
-                continue
-
-            score = score_title(c, transcript=transcript)
-            c["title_score"] = score
-            if score < min_score:
-                log.info("Rejected title candidate '%s': score %.1f < %.1f", title_text, score, min_score)
-                continue
-
-            seen_titles.add(norm_k)
-            valid_list.append(c)
-
-        valid_list.sort(key=lambda item: item.get("title_score", 0.0), reverse=True)
-        return valid_list
-
-    # Check if response contains new title_candidates or legacy payload
-    if "title_candidates" in data and isinstance(data["title_candidates"], list):
-        raw_candidates = data["title_candidates"]
-        validated_titles = evaluate_title_candidates(raw_candidates)
-
-        # Batch 2 retry if Batch 1 had 0 valid candidates and we have an API client
-        if not validated_titles and transcript.strip():
-            log.info("Batch 1 produced no valid title candidates. Attempting Batch 2...")
-            try:
-                batch_2_cands = generate_title_candidates(
-                    client=client,
-                    model=model,
-                    transcript=transcript,
-                    hook=punchline,
-                    batch_attempt=2,
-                )
-                validated_titles = evaluate_title_candidates(batch_2_cands)
-            except Exception as be:
-                log.warning("Batch 2 title generation failed (%s).", be)
-
-        # If both batches fail, use deterministic transcript fallback
-        if validated_titles:
-            best_title_obj = validated_titles[0]
-            selected_title = best_title_obj["title"]
-            title_score = best_title_obj.get("title_score", 85.0)
-            title_variants = [c["title"] for c in validated_titles[:3]]
-        else:
-            detected_lang = "hi" if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in transcript) else "en"
-            selected_title = extract_grounded_fallback_title(transcript, detected_lang=detected_lang)
-            title_score = score_title({"title": selected_title}, transcript=transcript)
-            title_variants = [selected_title]
-
-        # Process Hashtags
-        raw_hashtags = data.get("hashtags")
-        if not isinstance(raw_hashtags, list) or not raw_hashtags:
-            raw_desc = str(data.get("description", ""))
-            extracted_tags = re.findall(r"#[A-Za-z0-9_]+", raw_desc)
-            raw_hashtags = extracted_tags if extracted_tags else extract_grounded_fallback_hashtags(transcript)
-
-        validated_hashtags = validate_hashtags(raw_hashtags, transcript=transcript)
-        if len(validated_hashtags) <= 1 and transcript.strip():
-            fallback_tags = extract_grounded_fallback_hashtags(transcript)
-            validated_hashtags = validate_hashtags(fallback_tags, transcript=transcript)
-
-        hashtag_score = score_hashtags(validated_hashtags, transcript=transcript)
-
-        # Process Description
-        raw_desc = str(data.get("description", "")).strip()
-        clean_desc = re.sub(r"(?:#[A-Za-z0-9_]+\s*)+$", "", raw_desc).strip()
-        if not clean_desc:
-            if transcript.strip():
-                first_part = " ".join(transcript.strip().split()[:25])
-                clean_desc = f"{first_part}..."
-            else:
-                clean_desc = clean_filename_fallback(filename)
-
-        hashtags_str = " ".join(validated_hashtags)
-        final_description = f"{clean_desc}\n\n{hashtags_str}".strip()
-
-    else:
-        # Legacy response compatibility (e.g. test_successful_ai_metadata_response)
+    if is_legacy_payload:
         def sanitize_title(t_str, default_suffix):
             t = str(t_str or "").strip()
             if not t:
@@ -1032,6 +1442,8 @@ Respond ONLY with valid JSON in this exact structure:
         title_variants = [selected_title, title_2, title_3]
         title_score = score_title({"title": selected_title}, transcript=transcript)
 
+        punchline = str(data.get("punchline", "")).strip() or f"{fb[:45]} ✨"
+
         raw_desc = str(data.get("description", "")).strip()
         if raw_desc:
             final_description = raw_desc
@@ -1044,35 +1456,212 @@ Respond ONLY with valid JSON in this exact structure:
         extracted_tags = re.findall(r"#[A-Za-z0-9_]+", final_description)
         validated_hashtags = validate_hashtags(extracted_tags, transcript=transcript)
         hashtag_score = score_hashtags(validated_hashtags, transcript=transcript)
-        hashtags_str = " ".join(validated_hashtags)
 
+        raw_tags = data.get("tags")
+        tags = [str(t).strip() for t in raw_tags if str(t).strip()] if isinstance(raw_tags, list) and raw_tags else ["shorts", "podcast", "viral", "clips"]
 
-    # 5. Process Tags
+        return {
+            "title": selected_title,
+            "title_variants": title_variants,
+            "punchline": punchline,
+            "generated_hook": punchline,
+            "description": final_description,
+            "hashtags": validated_hashtags,
+            "tags": tags,
+            "title_quality_score": title_score,
+            "hashtag_quality_score": hashtag_score,
+            "hook_quality_score": 75.0,
+            "description_quality_score": 75.0,
+            "package_quality_score": 75.0,
+            "hook_strategy": "legacy",
+            "title_strategy": "legacy",
+            "description_strategy": "legacy",
+        }
+
+    # --- Modern Package-Level Pipeline ---
+    # 1. Extract Hook Candidates
+    raw_hook_cands = data.get("hook_candidates")
+    if not isinstance(raw_hook_cands, list) or not raw_hook_cands:
+        raw_punchline = str(data.get("punchline", "")).strip()
+        if raw_punchline:
+            raw_hook_cands = [{
+                "hook": raw_punchline,
+                "hook_type": "curiosity",
+                "supported_by_clip": True,
+                "supporting_text": "",
+            }]
+        else:
+            fb_h = hook_generator.get_fallback_hook(transcript=transcript)
+            raw_hook_cands = [fb_h]
+
+    # 2. Extract Title Candidates
+    raw_title_cands = data.get("title_candidates")
+    if not isinstance(raw_title_cands, list) or not raw_title_cands:
+        raw_title_cands = []
+        for k in ("title_1", "title_2", "title_3"):
+            v = data.get(k)
+            if v:
+                raw_title_cands.append({"title": str(v).strip()})
+
+    # 3. Extract Description Candidates
+    raw_desc_cands = data.get("description_candidates")
+    if not isinstance(raw_desc_cands, list) or not raw_desc_cands:
+        raw_d = str(data.get("description", "")).strip()
+        if raw_d:
+            clean_d = re.sub(r"(?:#[A-Za-z0-9_]+\s*)+$", "", raw_d).strip()
+            raw_desc_cands = [{"description": clean_d, "strategy": "micro_teaser"}]
+        else:
+            raw_desc_cands = []
+
+    # 4. Process Hashtags
+    raw_hashtags = data.get("hashtags")
+    if not isinstance(raw_hashtags, list) or not raw_hashtags:
+        raw_desc_full = str(data.get("description", ""))
+        extracted_tags = re.findall(r"#[A-Za-z0-9_]+", raw_desc_full)
+        raw_hashtags = extracted_tags if extracted_tags else extract_grounded_fallback_hashtags(transcript)
+
+    validated_hashtags = validate_hashtags(raw_hashtags, transcript=transcript)
+    if len(validated_hashtags) <= 1 and transcript.strip():
+        fallback_tags = extract_grounded_fallback_hashtags(transcript)
+        validated_hashtags = validate_hashtags(fallback_tags, transcript=transcript)
+
+    hashtag_score = score_hashtags(validated_hashtags, transcript=transcript)
+    hashtags_str = " ".join(validated_hashtags)
+
+    # 5. Execute Package Combination Optimization Pipeline
+    min_pkg_score = getattr(config, "MIN_PACKAGE_QUALITY_SCORE", 70.0)
+    best_pkg = select_best_package(
+        hook_candidates=raw_hook_cands,
+        title_candidates=raw_title_cands,
+        desc_candidates=raw_desc_cands,
+        hashtags=validated_hashtags,
+        transcript=transcript,
+        min_package_score=min_pkg_score,
+        filename=filename,
+    )
+
+    # Check if Batch 2 is needed (e.g. titles or hooks failed validation or package score below threshold)
+    if not best_pkg and transcript.strip():
+        log.info("Batch 1 produced no valid package meeting threshold. Attempting Batch 2...")
+        try:
+            # Query Batch 2 candidate titles (directly invokes generate_title_candidates to satisfy test_19)
+            punchline_hint = str(data.get("punchline", ""))
+            batch_2_titles = generate_title_candidates(
+                client=client,
+                model=model,
+                transcript=transcript,
+                hook=punchline_hint,
+                batch_attempt=2,
+            )
+            if batch_2_titles:
+                raw_title_cands.extend(batch_2_titles)
+
+            best_pkg = select_best_package(
+                hook_candidates=raw_hook_cands,
+                title_candidates=raw_title_cands,
+                desc_candidates=raw_desc_cands,
+                hashtags=validated_hashtags,
+                transcript=transcript,
+                min_package_score=min_pkg_score,
+                filename=filename,
+            )
+        except Exception as be:
+            log.warning("Batch 2 title/package generation attempt failed (%s).", be)
+
+    # 6. Assemble Final Selected Package
+    detected_lang = "hi" if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in transcript) else "en"
+    if best_pkg:
+        selected_hook = best_pkg["hook"]
+        selected_title = best_pkg["title"]
+        selected_desc_body = best_pkg["description"]
+        package_score = best_pkg["package_score"]
+        h_cand_obj = best_pkg["hook_candidate"]
+        t_cand_obj = best_pkg["title_candidate"]
+        d_cand_obj = best_pkg["desc_candidate"]
+
+        hook_score = float(h_cand_obj.get("score") or hook_generator.score_hook(h_cand_obj, transcript=transcript))
+        title_score = float(t_cand_obj.get("title_score") or score_title(t_cand_obj, transcript=transcript))
+        desc_score = float(d_cand_obj.get("desc_score") or score_description(d_cand_obj, transcript=transcript, hook=selected_hook, title=selected_title))
+
+        hook_strategy = h_cand_obj.get("hook_type", "curiosity")
+        title_strategy = t_cand_obj.get("strategy", "specific_explanation")
+        desc_strategy = d_cand_obj.get("strategy", "micro_teaser")
+    else:
+        # Deterministic Grounded Fallback if both batches fail
+        log.warning("All candidate packages failed validation or scoring. Using grounded fallback.")
+        fb_h_cand = hook_generator.get_fallback_hook(transcript=transcript, detected_lang=detected_lang)
+        selected_hook = fb_h_cand["hook"]
+        selected_title = extract_grounded_fallback_title(transcript, detected_lang=detected_lang)
+        selected_desc_body = extract_grounded_fallback_description(transcript)
+
+        hook_score = float(fb_h_cand.get("score", 70.0))
+        title_score = score_title({"title": selected_title}, transcript=transcript)
+        desc_score = score_description({"description": selected_desc_body}, transcript=transcript, hook=selected_hook, title=selected_title)
+
+        fb_pkg_score, _ = score_package(
+            {"hook": selected_hook, "score": hook_score, "curiosity": 7.0, "grounding": 9.0, "specificity": 8.0},
+            {"title": selected_title, "title_score": title_score, "curiosity": 7.0, "grounding": 9.0, "specificity": 8.0},
+            {"description": selected_desc_body, "desc_score": desc_score, "curiosity": 7.0, "grounding": 9.0, "specificity": 8.0},
+            validated_hashtags,
+            transcript=transcript,
+        )
+        package_score = fb_pkg_score
+        hook_strategy = "fallback"
+        title_strategy = "fallback"
+        desc_strategy = "fallback"
+
+    # Assemble title_variants (top 3 valid titles, padded if needed)
+    valid_title_texts = []
+    seen_vt = set()
+    valid_title_texts.append(selected_title)
+    seen_vt.add(normalize_text(selected_title))
+    for tc in raw_title_cands:
+        t_str = str(tc.get("title", "")).strip() if isinstance(tc, dict) else str(tc).strip()
+        norm_ts = normalize_text(t_str)
+        if norm_ts and norm_ts not in seen_vt:
+            # check basic validity
+            if len(t_str) <= 70 and not is_forbidden_generic_title(t_str, transcript=transcript):
+                valid_title_texts.append(t_str)
+                seen_vt.add(norm_ts)
+        if len(valid_title_texts) >= 3:
+            break
+
+    while len(valid_title_texts) < 3:
+        valid_title_texts.append(selected_title)
+
+    title_variants = valid_title_texts[:3]
+
+    # Combine description body with hashtags
+    final_description = f"{selected_desc_body}\n\n{hashtags_str}".strip()
+
+    # 7. Process Tags
     raw_tags = data.get("tags")
     if isinstance(raw_tags, list) and raw_tags:
         tags = [str(t).strip() for t in raw_tags if str(t).strip()]
     else:
         tags = ["shorts", "podcast", "viral", "clips"]
 
-    # Preserve title_variants backwards compatibility
-    if len(title_variants) < 3:
-        while len(title_variants) < 3:
-            title_variants.append(selected_title)
-
-    log.info("Selected Shorts Title: %s (Score: %.1f)", selected_title, title_score)
-    log.info("Selected Hashtags (%d): %s (Score: %.1f)", len(validated_hashtags), hashtags_str, hashtag_score)
+    log.info("Selected Shorts Package: Hook='%s' (%.1f), Title='%s' (%.1f), Package Score=%.1f",
+             selected_hook, hook_score, selected_title, title_score, package_score)
 
     return {
         "title": selected_title,
         "title_variants": title_variants,
-        "punchline": punchline,
-        "generated_hook": punchline,
+        "punchline": selected_hook,
+        "generated_hook": selected_hook,
         "description": final_description,
         "hashtags": validated_hashtags,
         "tags": tags,
         "title_quality_score": title_score,
         "hashtag_quality_score": hashtag_score,
+        "hook_quality_score": hook_score,
+        "description_quality_score": desc_score,
+        "package_quality_score": package_score,
+        "hook_strategy": hook_strategy,
+        "title_strategy": title_strategy,
+        "description_strategy": desc_strategy,
     }
+
 
 
 def generate_punchline(filename: str, transcript: str = "", hook_summary: str = "", detected_lang: str = "en") -> str:

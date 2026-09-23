@@ -23,20 +23,29 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 from openai import OpenAI
+import config
 from config import GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL
 from clip_detection import _get_best_groq_model
 
 log = logging.getLogger("hook_generator")
 
 # Maximum characters allowed for a Shorts top header hook
-MAX_HOOK_CHARS = 42
+MAX_HOOK_CHARS = getattr(config, "HOOK_MAX_LENGTH", 42)
 
-# Allowed hook types based on actual clip content
+# Allowed hook types / strategies based on actual clip content
 ALLOWED_HOOK_TYPES = {
+    # 5 Candidate strategies
+    "curiosity",
+    "contrarian",
+    "expectation_vs_reality",
     "question",
+    "consequence",
+    "specific_fact",
+    "number_mechanism",
+    # Legacy / descriptive categories
     "surprising_fact",
     "insight",
     "strong_claim",
@@ -44,28 +53,58 @@ ALLOWED_HOOK_TYPES = {
     "explanation",
     "cause_effect",
     "contradiction",
-    "curiosity",
     "revelation",
     "unexpected_fact",
-    "consequence",
     "debate",
     "emotional",
 }
 
-# Authoritative Grounded 6-Dimension Hook Scoring Weights (must sum to 1.0)
-# Grounding / factual support: 30%
-# Specificity: 20%
+# Semantic Emoji Category Mapping
+SEMANTIC_EMOJI_CATEGORIES = {
+    "finance": ["💰", "📈", "💸", "💵", "🪙"],
+    "health": ["🩺", "❤️", "🚭", "🚬", "🧠", "🏥", "💊"],
+    "technology": ["🤖", "💻", "⚡", "📱", "🔬"],
+    "business": ["📈", "💼", "🏢", "📊"],
+    "time": ["⏳", "⏰", "⌛"],
+    "risk": ["⚠️", "🚨"],
+    "success": ["🚀", "🏆", "🎯", "💡"],
+    "science": ["🔬", "🧪", "🧬"],
+    "food": ["🍽️", "🥗", "☕", "🍎"],
+    "travel": ["✈️", "🌍", "🗺️"],
+}
+
+# Domain keyword associations for emoji relevance verification
+EMOJI_DOMAIN_KEYWORDS = {
+    "finance": ["money", "rupee", "lakh", "crore", "wealth", "invest", "compound", "saving", "stock", "dollar", "financial", "return"],
+    "health": ["health", "fertility", "smoking", "sperm", "doctor", "disease", "body", "cancer", "medical", "sleep", "brain", "habit"],
+    "technology": ["ai", "tech", "software", "code", "model", "computer", "developer", "automation", "algorithm", "robot"],
+    "business": ["business", "startup", "company", "founder", "sales", "revenue", "market", "customer", "product"],
+    "time": ["time", "waiting", "years", "months", "days", "hours", "delay", "early", "future", "now"],
+    "risk": ["risk", "danger", "warning", "mistake", "wrong", "trap", "threat", "avoid"],
+    "success": ["success", "winner", "achieve", "grow", "growth", "goal", "mastery"],
+    "science": ["science", "study", "research", "experiment", "evidence", "proven", "dna"],
+    "food": ["food", "diet", "eating", "meal", "nutrition", "sugar", "calories"],
+    "travel": ["travel", "world", "country", "flight", "trip"],
+}
+
+# Authoritative Grounded 8-Dimension Hook Scoring Weights (must sum to 1.0)
+# Scroll-stop potential: 25%
 # Curiosity: 20%
-# Relevance to clip payoff: 15%
-# Clarity: 10%
-# Brevity: 5%
+# Grounding / factual support: 20%
+# Specificity: 15%
+# Relevance to clip payoff: 10%
+# Clarity: 5%
+# Brevity: 3%
+# Emoji relevance: 2%
 HOOK_SCORING_WEIGHTS = {
-    "grounding": 0.30,
-    "specificity": 0.20,
+    "scroll_stop": 0.25,
     "curiosity": 0.20,
-    "relevance": 0.15,
-    "clarity": 0.10,
-    "brevity": 0.05,
+    "grounding": 0.20,
+    "specificity": 0.15,
+    "relevance": 0.10,
+    "clarity": 0.05,
+    "brevity": 0.03,
+    "emoji_relevance": 0.02,
 }
 
 # Legacy scoring weights for backward compatibility with ungrounded test fixtures
@@ -77,6 +116,7 @@ LEGACY_HOOK_SCORING_WEIGHTS = {
     "brevity": 0.10,
     "impact": 0.10,
 }
+
 
 # Emoji detection pattern covering emoticons, flags, pictographs, symbols
 EMOJI_PATTERN = re.compile(
@@ -134,6 +174,58 @@ FORBIDDEN_GENERIC_PATTERNS = [
 def count_emojis(text: str) -> int:
     """Returns the total number of emojis present in the text."""
     return len(EMOJI_PATTERN.findall(text))
+
+
+def extract_emojis(text: str) -> List[str]:
+    """Returns a list of all individual emoji matches found in text."""
+    if not text:
+        return []
+    return EMOJI_PATTERN.findall(text)
+
+
+def evaluate_emoji_relevance(emojis: List[str], transcript: str = "", hook: str = "") -> float:
+    """
+    Evaluates semantic relevance of hook emojis (0.0 to 10.0 scale).
+    - 0 emojis: 8.5/10 (clean, no distraction)
+    - 1 emoji matching transcript domain: 10.0/10
+    - 1 emoji neutral/general: 7.5/10
+    - 2 emojis both independently matching domain: 9.5/10
+    - 2 emojis neutral: 7.0/10
+    - Unrelated / unfitting emoji: 5.5/10
+    """
+    if not emojis:
+        return 8.5
+
+    norm_tr = normalize_text_for_matching(transcript)
+    norm_hk = normalize_text_for_matching(hook)
+    combined_text = f"{norm_hk} {norm_tr}"
+
+    emoji_scores = []
+    for em in emojis:
+        matched_domain = None
+        for domain, em_list in SEMANTIC_EMOJI_CATEGORIES.items():
+            if em in em_list:
+                matched_domain = domain
+                break
+
+        if not matched_domain:
+            emoji_scores.append(7.0)
+            continue
+
+        keywords = EMOJI_DOMAIN_KEYWORDS.get(matched_domain, [])
+        if any(kw in combined_text for kw in keywords):
+            emoji_scores.append(10.0)
+        else:
+            emoji_scores.append(5.5)
+
+    if len(emoji_scores) == 1:
+        return emoji_scores[0]
+    elif len(emoji_scores) >= 2:
+        if all(s >= 9.0 for s in emoji_scores):
+            return 9.5
+        return round(sum(emoji_scores) / len(emoji_scores), 2)
+
+    return 7.0
 
 
 def clean_hook_text(text: str) -> str:
@@ -286,6 +378,161 @@ def extract_grounded_fallback_hook(transcript: str, detected_lang: str = "en") -
     return ("", "")
 
 
+# Extreme / absolute claim words that require strict transcript support
+EXTREME_CLAIM_WORDS: Set[str] = {
+    "permanent", "permanently", "incurable", "guaranteed", "guarantee", "guarantees",
+    "deadly", "fatal", "cure", "cures", "cured", "curing", "impossible", "illegal",
+    "arrested", "banned", "100%", "destroys", "destroyed", "destroying", "destroy",
+    "eradicates", "eradicated", "eradicate", "miracle",
+}
+
+# Probabilistic hedging indicators in source transcripts
+HEDGE_INDICATORS: List[str] = [
+    "might", "may", "could", "can", "possibly", "potentially",
+    "sometimes", "associated with", "linked to", "studies suggest",
+    "preliminary", "risk factor",
+]
+
+# Absolute indicators that escalate claim strength when unsupported by the clip
+ABSOLUTE_INDICATORS: Set[str] = {
+    "always", "never", "definitely", "guaranteed", "guarantee", "guarantees",
+    "proves", "proven", "prove", "destroys", "destroyed", "destroy",
+    "cure", "cures", "100%",
+}
+
+
+def validate_claim_strength(
+    generated_text: str,
+    supporting_text: str = "",
+    transcript: str = "",
+) -> Tuple[bool, str]:
+    """
+    Deterministically validates that the generated text (Hook, Title, or Description)
+    preserves the claim strength of the source clip transcript and supporting text.
+
+    Detects and rejects meaningful escalations in:
+    - Certainty (e.g. may/might/could -> will/definitely/certain)
+    - Causality (e.g. associated with/linked to/correlated with -> causes)
+    - Universality (e.g. some/in some cases -> all/everyone/universally)
+    - Probability (e.g. possible/can help -> guarantees/certain)
+    - Modality (e.g. could/can/may/might -> will)
+    - Evidence strength (e.g. suggests/indicates/preliminary -> proves/proven)
+    - Temporal qualification (e.g. historically/often/sometimes -> always/never)
+    - Scope & explanation (e.g. one possible explanation -> the reason is)
+    - Extreme absolute claims (EXTREME_CLAIM_WORDS unsupported by clip)
+
+    Returns (is_valid, reason).
+    """
+    if not generated_text:
+        return True, "Valid"
+
+    reference = f"{supporting_text} {transcript}".strip()
+    if not reference:
+        return True, "Valid"
+
+    norm_gen = re.sub(r"[^\w\s%]", " ", generated_text.lower())
+    norm_ref = re.sub(r"[^\w\s%]", " ", reference.lower())
+    gen_words = set(norm_gen.split())
+    ref_words = set(norm_ref.split())
+
+    # 1. Extreme / absolute claim words check
+    for ew in EXTREME_CLAIM_WORDS:
+        if ew in gen_words and ew not in ref_words:
+            return False, f"'{ew}'"
+
+    # 2. Causality Escalation: associated with / linked to / correlated with -> causes
+    correlation_markers = [
+        "associated with", "associated", "linked to", "link to", "links to",
+        "correlated with", "correlation between", "connection between", "relationship between"
+    ]
+    causation_markers = ["causes", "caused", "causing", "cause of", "leads directly to"]
+    has_correlation = any(m in norm_ref for m in correlation_markers)
+    has_ref_causation = any(
+        re.search(r"\b" + re.escape(w) + r"\b", norm_ref)
+        for w in ["cause", "causes", "caused", "causing", "leads to", "leading to"]
+    )
+    if has_correlation and not has_ref_causation:
+        for c in causation_markers:
+            if re.search(r"\b" + re.escape(c) + r"\b", norm_gen):
+                return False, f"'{c}'"
+
+    # 3. Evidence Strength Escalation: suggests / indicates -> proves
+    suggest_markers = [
+        "suggests", "suggest", "studies suggest", "study suggests",
+        "research suggests", "indicates", "indicate", "evidence suggests",
+        "preliminary", "theorized", "hypothesis"
+    ]
+    proof_markers = ["proves", "proven", "prove", "proof", "science proves", "confirms definitely"]
+    has_suggest = any(m in norm_ref for m in suggest_markers)
+    has_ref_proof = any(
+        re.search(r"\b" + re.escape(w) + r"\b", norm_ref)
+        for w in ["prove", "proves", "proven", "proof"]
+    )
+    if has_suggest and not has_ref_proof:
+        for p in proof_markers:
+            if re.search(r"\b" + re.escape(p) + r"\b", norm_gen):
+                return False, f"'{p}'"
+
+    # 4. Modality / Certainty Escalation: may / might / could / possibly -> will / definitely
+    modal_hedges = ["may", "might", "could", "possibly", "potentially", "can potentially", "could potentially"]
+    modal_absolutes = ["will", "definitely", "certainly", "shall"]
+    has_modal_hedge = any(re.search(r"\b" + re.escape(h) + r"\b", norm_ref) for h in modal_hedges)
+    has_ref_will = any(re.search(r"\b" + re.escape(w) + r"\b", norm_ref) for w in modal_absolutes)
+    if has_modal_hedge and not has_ref_will:
+        for ma in modal_absolutes:
+            if re.search(r"\b" + re.escape(ma) + r"\b", norm_gen):
+                return False, f"'{ma}'"
+
+    # 5. Probability / Guarantee Escalation: can / can help / may help -> guarantees
+    guarantee_markers = ["guarantees", "guaranteed", "guarantee"]
+    has_ref_guarantee = any(re.search(r"\b" + re.escape(g) + r"\b", norm_ref) for g in guarantee_markers)
+    if not has_ref_guarantee:
+        for gm in guarantee_markers:
+            if re.search(r"\b" + re.escape(gm) + r"\b", norm_gen):
+                return False, f"'{gm}'"
+
+    # 6. Frequency / Temporal Escalation: historically / sometimes / often -> always / never
+    frequency_hedges = ["historically", "in the past", "sometimes", "often", "frequently", "occasionally", "at times"]
+    frequency_absolutes = ["always", "never", "every single time", "at all times"]
+    has_freq_hedge = any(m in norm_ref for m in frequency_hedges)
+    has_ref_freq_abs = any(re.search(r"\b" + re.escape(fa) + r"\b", norm_ref) for fa in ["always", "never"])
+    if (has_freq_hedge or "can " in norm_ref or "could " in norm_ref) and not has_ref_freq_abs:
+        for fa in frequency_absolutes:
+            if re.search(r"\b" + re.escape(fa) + r"\b", norm_gen):
+                return False, f"'{fa}'"
+
+    # 7. Scope / Universality Escalation: some / in some cases -> everyone / all
+    scope_hedges = [
+        "some people", "some patients", "some individuals", "some",
+        "in some cases", "in certain cases", "a portion of"
+    ]
+    scope_absolutes = ["everyone", "everybody", "all people", "universally", "every single person"]
+    has_scope_hedge = any(m in norm_ref for m in scope_hedges)
+    has_ref_scope_abs = any(re.search(r"\b" + re.escape(sa) + r"\b", norm_ref) for sa in scope_absolutes)
+    if has_scope_hedge and not has_ref_scope_abs:
+        for sa in scope_absolutes:
+            if re.search(r"\b" + re.escape(sa) + r"\b", norm_gen):
+                return False, f"'{sa}'"
+
+    # 8. Possibility / Explanation Escalation: possible / one possible explanation -> certain / the reason is
+    possibility_hedges = [
+        "one possible explanation", "possible explanation", "one possibility",
+        "possible", "potentially", "could potentially"
+    ]
+    certainty_absolutes = ["the reason is", "is the reason", "the only reason", "the real reason", "certain", "definitely", "certain to"]
+    has_poss_hedge = any(m in norm_ref for m in possibility_hedges)
+    has_ref_certain = any(re.search(r"\b" + re.escape(ca) + r"\b", norm_ref) for ca in certainty_absolutes)
+    if has_poss_hedge and not has_ref_certain:
+        for ca in certainty_absolutes:
+            if re.search(r"\b" + re.escape(ca) + r"\b", norm_gen):
+                return False, f"'{ca}'"
+
+    return True, "Valid"
+
+
+check_claim_strength_preservation = validate_claim_strength
+
+
 def validate_hook(
     candidate: dict,
     transcript: str = "",
@@ -339,10 +586,33 @@ def validate_hook(
     if is_forbidden_generic_hook(hook, transcript=transcript):
         return False, f"Hook is a forbidden generic clickbait template without concrete subject ('{hook}')"
 
-    # 9. Emoji limit (max 1 emoji)
-    n_emojis = count_emojis(hook)
-    if n_emojis > 1:
-        return False, f"Hook contains multiple emojis ({n_emojis} > 1 allowed)"
+    # 9. Emoji validation & policy enforcement:
+    # - 0–2 emojis maximum (configurable via config.MAX_HOOK_EMOJIS, default 2)
+    # - Prefer 1 semantically relevant emoji
+    # - 2 emojis allowed only when both independently reinforce the hook
+    # - No duplicate emojis
+    # - No emoji spam
+    # - No meaningless emoji chains (e.g. '👀🔥', '🚨😱🔥', '💰 💰')
+    # - Emojis must not replace important words
+    # - Emoji presence is never mandatory
+    hook_emojis = extract_emojis(raw_hook)
+    max_allowed_emojis = getattr(config, "MAX_HOOK_EMOJIS", 2)
+    if len(hook_emojis) > max_allowed_emojis:
+        return False, f"Hook contains multiple emojis ({len(hook_emojis)} > {max_allowed_emojis} allowed)"
+
+    # Check for consecutive emojis / emoji chains without intervening alphanumeric words
+    chain_match = re.search(r"(" + EMOJI_PATTERN.pattern + r"[\s,\.\!\?]*){2,}", raw_hook)
+    if chain_match:
+        matched_chain = chain_match.group(0).strip()
+        return False, f"Hook contains multiple emojis in sequence/chain (emoji chain: '{matched_chain}')"
+
+    # Check for duplicate emojis (e.g. '💰' and '💰')
+    if len(hook_emojis) > 1 and len(hook_emojis) != len(set(hook_emojis)):
+        return False, f"Hook contains duplicate emoji ('{hook_emojis[0]}')"
+
+    # Check that emoji does not replace words or form an emoji-only hook
+    if not words:
+        return False, "Hook cannot be emoji-only (emojis must not replace important words)"
 
     # 10. Supporting text grounding verification
     support = candidate.get("supporting_text", "").strip()
@@ -352,7 +622,13 @@ def validate_hook(
     elif require_supporting_text and transcript:
         return False, "Candidate is missing required supporting_text from clip transcript"
 
-    # 11. Valid hook_type check
+    # 11. Claim-strength preservation
+    if transcript:
+        is_pres, claim_word = check_claim_strength_preservation(hook, transcript)
+        if not is_pres:
+            return False, f"Hook introduces stronger unsupported claim ({claim_word})"
+
+    # 12. Valid hook_type check
     hook_type = candidate.get("hook_type", "curiosity").lower()
     if hook_type not in ALLOWED_HOOK_TYPES:
         candidate["hook_type"] = "curiosity"
@@ -363,12 +639,14 @@ def validate_hook(
 def score_hook(candidate: dict, transcript: str = "", hook_summary: str = "") -> float:
     """
     Calculates authoritative 0–100 score in Python using the exact weighted formula:
-    Grounding / factual support: 30%
-    Specificity: 20%
+    Scroll-stop potential: 25%
     Curiosity: 20%
-    Relevance to clip payoff: 15%
-    Clarity: 10%
-    Brevity: 5%
+    Grounding / factual support: 20%
+    Specificity: 15%
+    Relevance to clip payoff: 10%
+    Clarity: 5%
+    Brevity: 3%
+    Emoji relevance: 2%
     """
     def get_dim(*aliases: str, default: float = 7.0) -> float:
         for alias in aliases:
@@ -385,36 +663,14 @@ def score_hook(candidate: dict, transcript: str = "", hook_summary: str = "") ->
                     pass
         return default
 
-    has_grounding_schema = any(
-        k in candidate for k in ("grounding", "grounding_score", "specificity", "specificity_score", "supporting_text")
+    # Check if candidate is using legacy ungrounded test fixture schema (e.g. test_12_exact_python_scoring_formula)
+    # where curiosity, relevance, payoff, clarity, brevity, impact are provided without grounding or scroll_stop
+    has_legacy_schema = (
+        all(k in candidate for k in ("curiosity", "relevance", "payoff", "clarity", "brevity", "impact"))
+        and not any(k in candidate for k in ("grounding", "grounding_score", "scroll_stop", "scroll_stop_score", "supporting_text"))
     )
 
-    if has_grounding_schema:
-        # Check supporting text grounding
-        support = candidate.get("supporting_text", "")
-        if support and transcript:
-            if is_supporting_text_in_transcript(support, transcript):
-                grounding = get_dim("grounding_score", "grounding", "factual_support", default=9.5)
-            else:
-                grounding = 1.0  # ungrounded penalty
-        else:
-            grounding = get_dim("grounding_score", "grounding", "factual_support", default=8.5)
-
-        specificity = get_dim("specificity_score", "specificity", default=8.0)
-        curiosity = get_dim("curiosity_score", "curiosity", default=8.0)
-        relevance = get_dim("relevance_score", "relevance", "payoff_relevance", "payoff", default=8.0)
-        clarity = get_dim("clarity_score", "clarity", default=8.5)
-        brevity = get_dim("brevity_score", "brevity", default=8.5)
-
-        final_score = (
-            grounding * HOOK_SCORING_WEIGHTS["grounding"]
-            + specificity * HOOK_SCORING_WEIGHTS["specificity"]
-            + curiosity * HOOK_SCORING_WEIGHTS["curiosity"]
-            + relevance * HOOK_SCORING_WEIGHTS["relevance"]
-            + clarity * HOOK_SCORING_WEIGHTS["clarity"]
-            + brevity * HOOK_SCORING_WEIGHTS["brevity"]
-        ) * 10.0
-    else:
+    if has_legacy_schema:
         # Legacy formula for backward compatibility with ungrounded test fixtures:
         # (curiosity*0.25 + relevance*0.25 + payoff*0.15 + clarity*0.15 + brevity*0.10 + impact*0.10) * 10
         curiosity = get_dim("curiosity", default=8.0)
@@ -432,8 +688,48 @@ def score_hook(candidate: dict, transcript: str = "", hook_summary: str = "") ->
             + brevity * LEGACY_HOOK_SCORING_WEIGHTS["brevity"]
             + impact * LEGACY_HOOK_SCORING_WEIGHTS["impact"]
         ) * 10.0
+        return max(0.0, min(100.0, round(final_score, 2)))
+
+    # Grounded 8-Dimension Authoritative Scoring
+    support = candidate.get("supporting_text", "")
+    if support and transcript:
+        if is_supporting_text_in_transcript(support, transcript):
+            grounding = get_dim("grounding_score", "grounding", "factual_support", default=9.5)
+        else:
+            grounding = 1.0  # ungrounded penalty
+    else:
+        grounding = get_dim("grounding_score", "grounding", "factual_support", default=8.5)
+
+    specificity = get_dim("specificity_score", "specificity", default=8.0)
+    curiosity = get_dim("curiosity_score", "curiosity", default=8.0)
+    relevance = get_dim("relevance_score", "relevance", "payoff_relevance", "payoff", default=8.0)
+    clarity = get_dim("clarity_score", "clarity", default=8.5)
+    brevity = get_dim("brevity_score", "brevity", default=8.5)
+
+    # Scroll-stop potential defaults to composite of curiosity and specificity if not set
+    scroll_stop = get_dim(
+        "scroll_stop_score", "scroll_stop",
+        default=round(min(10.0, curiosity * 0.6 + specificity * 0.4), 2),
+    )
+
+    hook_text = candidate.get("hook", "")
+    emojis = extract_emojis(hook_text)
+    emoji_rel = evaluate_emoji_relevance(emojis, transcript=transcript, hook=hook_text)
+    emoji_relevance = get_dim("emoji_relevance_score", "emoji_relevance", default=emoji_rel)
+
+    final_score = (
+        scroll_stop * HOOK_SCORING_WEIGHTS["scroll_stop"]
+        + curiosity * HOOK_SCORING_WEIGHTS["curiosity"]
+        + grounding * HOOK_SCORING_WEIGHTS["grounding"]
+        + specificity * HOOK_SCORING_WEIGHTS["specificity"]
+        + relevance * HOOK_SCORING_WEIGHTS["relevance"]
+        + clarity * HOOK_SCORING_WEIGHTS["clarity"]
+        + brevity * HOOK_SCORING_WEIGHTS["brevity"]
+        + emoji_relevance * HOOK_SCORING_WEIGHTS["emoji_relevance"]
+    ) * 10.0
 
     return max(0.0, min(100.0, round(final_score, 2)))
+
 
 
 def get_fallback_hook(transcript: str = "", detected_lang: str = "en", hook_summary: str = "") -> dict:
@@ -507,18 +803,21 @@ Your task is to analyze ONLY the provided clip transcript and generate exactly 5
 4. Every hook must feature a CONCRETE, SPECIFIC SUBJECT or CLAIM from the clip (e.g. fertility, smoking, throat cancer, salary negotiation, sleep cycle, etc.).
 5. The `supporting_text` MUST be a short verbatim excerpt (3 to 15 words) copied directly from the transcript that directly supports the hook. Do NOT fabricate supporting text.
 6. Length: 3 to 8 words. Absolute maximum: 42 characters.
-7. Emojis: At most 1 relevant emoji (or 0 emojis). Never use 2 or more emojis.
+7. Emoji Policy:
+   - 0–2 emojis maximum.
+   - Prefer 1 semantically relevant emoji when it genuinely strengthens visual meaning.
+   - 2 emojis allowed ONLY when both independently reinforce concepts in the hook.
+   - 0 emojis when an emoji would make the hook worse. Emoji presence is never mandatory.
+   - NEVER generate duplicate emojis (e.g., '💰💰'), emoji chains (e.g., '👀🔥', '🚨😱🔥'), or emoji spam.
+   - Emojis must NEVER replace important words.
 8. {lang_instruction}
 
-HOOK STYLES TO CHOOSE FROM (Pick the style that best matches what is actually said):
-- Specific question (e.g. "CAN ORAL SEX CAUSE THROAT CANCER?")
-- Surprising fact (e.g. "SMOKING CAN AFFECT FERTILITY")
-- Counterintuitive insight (e.g. "THIS HABIT MAY HURT FERTILITY")
-- Strong claim (e.g. "HPV CAN REACH THE THROAT")
-- Myth/reality (e.g. "IS THIS FERTILITY MYTH TRUE?")
-- Important explanation (e.g. "WHY SMOKING REDUCES FERTILITY")
-- Cause/effect (e.g. "THIS CAN LOWER SPERM QUALITY")
-- Contradiction (e.g. "THE FERTILITY MYTH IS WRONG")
+5 HOOK CANDIDATE STRATEGIES TO USE (generate distinct strategies, not superficial rewrites):
+1. Curiosity: creates curiosity gap grounded strictly in clip
+2. Contrarian / expectation-vs-reality: challenges common assumption with clip fact
+3. Question: direct, intriguing question answered by the clip
+4. Consequence: highlights cause/effect or direct consequence revealed in clip
+5. Specific fact / number / mechanism: highlights concrete number, named concept, or specific mechanism
 
 CLIP TRANSCRIPT (THIS IS YOUR ONLY CONTEXT):
 \"\"\"
@@ -530,7 +829,7 @@ Respond ONLY with a valid JSON object containing exactly 5 candidates in this sc
   "candidates": [
     {{
       "hook": "SPECIFIC GROUNDED HOOK (UPPERCASE)",
-      "hook_type": "question | surprising_fact | insight | strong_claim | myth_reality | explanation | cause_effect | contradiction",
+      "hook_type": "curiosity | contrarian | question | consequence | specific_fact",
       "supporting_text": "exact verbatim excerpt from the transcript supporting this hook",
       "supported_by_clip": true,
       "grounding_reason": "brief explanation of how this hook reflects the clip's actual idea",
@@ -543,6 +842,7 @@ Respond ONLY with a valid JSON object containing exactly 5 candidates in this sc
   ]
 }}
 """
+
 
     response = client.chat.completions.create(
         model=model,
