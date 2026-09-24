@@ -146,7 +146,7 @@ class TestPhase9E2EProductionPaths(unittest.TestCase):
     def test_case_c_metadata_failure_resiliency(self, mock_call):
         """Case C: Metadata AI failure -> deterministic safe fallback used with is_fallback=True."""
         with patch.object(config, "GROQ_API_KEY", "gsk_test_key"), \
-             patch("metadata_ai._resolve_groq_model", return_value="llama-3.3-70b-versatile"):
+             patch("metadata_ai._resolve_groq_model", return_value="openai/gpt-oss-20b"):
             meta = metadata_ai.generate_shorts_metadata(
                 filename="biology_dna_repair.mp4",
                 transcript="DNA repair mechanisms operate continuously inside our cells.",
@@ -162,7 +162,7 @@ class TestPhase9E2EProductionPaths(unittest.TestCase):
         """Case D: Hook AI failure -> transcript-grounded deterministic fallback without claim fabrication."""
         transcript = "The speed of light in vacuum is approximately three hundred thousand kilometers per second."
         with patch.object(config, "GROQ_API_KEY", "gsk_test_key"), \
-             patch("hook_generator._resolve_groq_model", return_value="llama-3.3-70b-versatile"):
+             patch("hook_generator._resolve_groq_model", return_value="openai/gpt-oss-20b"):
             res = hook_generator.generate_short_hook(
                 transcript=transcript,
                 detected_lang="en",

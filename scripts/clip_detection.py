@@ -219,7 +219,7 @@ def _resolve_groq_model(client, configured_model: str = None) -> str:
     """
     Resolves and verifies the production Groq chat model.
     1. Uses explicit configured_model (or GROQ_CHAT_MODEL from config/environment).
-    2. Falls back to documented DEFAULT_GROQ_CHAT_MODEL ('llama-3.3-70b-versatile').
+    2. Falls back to documented DEFAULT_GROQ_CHAT_MODEL ('openai/gpt-oss-20b').
     3. Verifies that the model exists in the provider's active model list.
     4. If the model does not exist: fails fast with ModelConfigurationError.
        NEVER silently substitutes an arbitrary model.

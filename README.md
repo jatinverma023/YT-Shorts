@@ -565,7 +565,7 @@ All settings are configured via environment variables (loaded from `.env` locall
 ### AI & Language Models
 - `GROQ_API_KEY`: API key for Groq Cloud (Llama 3.3 70B & Whisper-large-v3).
 - `OPENAI_API_KEY`: API key for OpenAI (used as Whisper or GPT fallback).
-- `GROQ_CHAT_MODEL`: Specific Groq model override (defaults to `llama-3.3-70b-versatile`).
+- `GROQ_CHAT_MODEL`: Specific Groq model override (defaults to `openai/gpt-oss-20b`).
 
 ### Google Drive & Service Account
 - `GOOGLE_SERVICE_ACCOUNT_JSON`: Full JSON key string for Drive & Sheets authentication.

@@ -55,7 +55,7 @@ class TestPhase6HookGeneration(unittest.TestCase):
 
         cands = hook_generator.generate_hook_candidates(
             client=mock_client,
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             transcript=self.sample_transcript,
         )
 

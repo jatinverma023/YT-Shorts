@@ -48,7 +48,7 @@ DISCOVERY_CHUNK_OVERLAP_SECONDS = float(os.environ.get("DISCOVERY_CHUNK_OVERLAP_
 # --- Transcription & LLM (Groq Whisper-large-v3 or OpenAI Whisper) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY", "") or GROQ_API_KEY).strip()
-DEFAULT_GROQ_CHAT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_CHAT_MODEL = "openai/gpt-oss-20b"
 GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", DEFAULT_GROQ_CHAT_MODEL).strip()
 
 # --- AI Provider Rate Limiting & Token Budgeting ---
