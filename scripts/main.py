@@ -179,6 +179,10 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
             f"{base_name} Part {clip_index}",
             transcript=clip_transcript,
         )
+        active_report = run_report.get_current_report()
+        if active_report and meta.get("is_fallback"):
+            active_report.record_fallback("metadata", meta.get("fallback_reason", "Metadata AI fallback used"))
+
         title = meta["title"]
         variants = meta.get("title_variants", [title, title, title])
         description = meta["description"]
@@ -210,6 +214,8 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
                     detected_lang=detected_lang,
                 )
                 punchline = hook_res["selected_hook"]
+                if active_report and hook_res.get("is_fallback"):
+                    active_report.record_fallback("hook", hook_res.get("fallback_reason", "Hook AI fallback used"))
 
         # Ensure consistent punchline/generated_hook backward-compatible representation
         meta["punchline"] = punchline
@@ -512,13 +518,34 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
 
         # 2. Run AI multi-clip detection (dynamic yield: max_clips=None)
         log.info("Detecting viral, high-retention talk segment clips from full transcript...")
-        clips = clip_detection.detect_clips_from_transcript(segments, total_duration, max_clips=None)
+        try:
+            clips = clip_detection.detect_clips_from_transcript(segments, total_duration, max_clips=None)
+        except clip_detection.ClipDiscoveryError as cde:
+            # Case A: AI DISCOVERY FAILURE (API/LLM infrastructure failure)
+            # Source video remains in Incoming for future retry. Zero clips enqueued. Zero clips published.
+            log.warning("[AI_DISCOVERY_FAILURE] %s for '%s'. Preserving source in Incoming.", cde, name)
+            sheet_log.log_run(name, "FAILED (AI Discovery)", error=str(cde))
+            notify.send(
+                f"⚠️ AI clip discovery failed for '{name}' (API/LLM error). Source preserved in Incoming for retry.\nError: {cde}"
+            )
+            if report:
+                report.set_discovery_status("FAILED")
+                report.add_error("clip_discovery", type(cde).__name__, str(cde), affected=name)
+                report.update_stage("ai_analysis", "❌ Failed (API/LLM error)")
+                report.update_stage("quality_scoring", "⏭️ Skipped")
+                report.update_stage("standalone_validation", "⏭️ Skipped")
+                report.set_overall_status("FAILED 🔴")
+                report.set_source(name, file_id=file_id, destination="Preserved in Incoming (AI discovery failure)")
+                report.summary_source_status = "Preserved in Incoming (AI discovery failure)"
+            return {"total_queued": 0, "uploaded": 0, "failed": 1, "urls": [], "errors": [str(cde)], "discovery_failed": True}
 
         if not clips:
-            # ZERO VALID CLIPS TERMINAL HANDLING (Correction #6):
+            # Case B: ZERO VALID CLIPS TERMINAL HANDLING:
+            # Successful discovery, but zero candidates passed quality (>=70) / standalone (>=7.0) gates.
             log.info("0 valid clips met quality/standalone criteria for '%s'. Marking terminal state.", name)
             sheet_log.enqueue_zero_clips(file_id, name, reason="no_valid_clips", candidate_count=len(segments))
             if report:
+                report.set_discovery_status("NO_VALID_CLIPS")
                 report.update_stage("ai_analysis", "✅ Completed")
                 report.update_stage("quality_scoring", "✅ Completed (0 qualified)")
                 report.update_stage("standalone_validation", "✅ Completed")
@@ -536,6 +563,7 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
             return {"total_queued": 0, "uploaded": 0, "failed": 0, "urls": [], "errors": []}
 
         if report:
+            report.set_discovery_status("SUCCESS")
             report.update_stage("ai_analysis", "✅ Completed")
             report.update_stage("quality_scoring", "✅ Completed")
             report.update_stage("standalone_validation", "✅ Completed")

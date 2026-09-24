@@ -62,7 +62,10 @@ def get_youtube_client():
         token_uri="https://oauth2.googleapis.com/token",
         client_id=YT_CLIENT_ID,
         client_secret=YT_CLIENT_SECRET,
-        scopes=["https://www.googleapis.com/auth/youtube.upload"],
+        scopes=[
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube.readonly",
+        ],
     )
     return googleapiclient.discovery.build("youtube", "v3", credentials=creds)
 
@@ -113,7 +116,15 @@ def find_existing_short(clip_identifier: str = None, title: str = None, client=N
                 return f"https://youtube.com/shorts/{vid_id}"
 
     except Exception as e:
-        log.warning("Could not check for existing YouTube upload: %s", e)
+        err_str = str(e)
+        if "insufficient" in err_str.lower() or "403" in err_str:
+            log.warning(
+                "YouTube duplicate check skipped: OAuth refresh token lacks 'youtube.readonly' scope. "
+                "Upload will proceed without duplicate check. To enable duplicate detection, re-run "
+                "'get_refresh_token.py' to generate a token with 'https://www.googleapis.com/auth/youtube.readonly' scope."
+            )
+        else:
+            log.warning("Could not check for existing YouTube upload: %s", e)
 
     return None
 

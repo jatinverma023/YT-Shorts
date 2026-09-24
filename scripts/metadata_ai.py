@@ -12,8 +12,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from openai import OpenAI
 import config
-from clip_detection import _get_best_groq_model
+from clip_detection import _get_best_groq_model, _resolve_groq_model
 import hook_generator
+from ai_rate_limiter import call_with_rate_limit
 
 log = logging.getLogger("metadata_ai")
 
@@ -1210,31 +1211,45 @@ Respond ONLY with valid JSON in this exact structure:
   "candidates": [
     {{
       "title": "Natural Engaging Title Here",
-      "grounding_score": 9.0,
-      "specificity_score": 8.5,
-      "curiosity_score": 8.5,
-      "relevance_score": 9.0,
-      "clarity_score": 9.0
+      "strategy": "specific_explanation"
     }}
   ]
 }}
 """
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.60,
-        max_tokens=700,
-        response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
-    )
-    content = response.choices[0].message.content.strip()
-    data = extract_json_payload(content)
-    cands = data.get("candidates", [])
-    if isinstance(cands, list):
-        return cands
+    def _api_call():
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.60,
+            max_tokens=600,
+            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+        )
+
+    try:
+        response = call_with_rate_limit(
+            client_fn=_api_call,
+            prompt_or_messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+        )
+        choice = response.choices[0] if (response and getattr(response, "choices", None)) else None
+        if not choice or getattr(choice, "finish_reason", None) == "length":
+            return []
+        content = choice.message.content.strip() if choice.message else ""
+        data = extract_json_payload(content)
+        cands = data.get("candidates", [])
+        if isinstance(cands, list):
+            return cands
+    except Exception as e:
+        log.warning("Batch 2 title generation call failed: %s", e)
     return []
 
 
-def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
+def generate_shorts_metadata(
+    filename: str,
+    transcript: str = "",
+    hook: str = "",
+    hook_candidates: list = None,
+) -> dict:
     """
     Generates authentic, transcript-grounded YouTube Shorts metadata:
     - title (best candidate selected from 5 candidates, validated and scored)
@@ -1270,6 +1285,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
             "title_strategy": "fallback",
             "description_strategy": "fallback",
             "is_fallback": True,
+            "fallback_reason": "No AI API key configured",
         }
 
     # Initialize client (Groq or OpenAI)
@@ -1279,7 +1295,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
 
     if is_groq:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-        model = chat_model or _get_best_groq_model(client)
+        model = _resolve_groq_model(client, configured_model=chat_model)
     else:
         client = OpenAI(api_key=api_key)
         model = chat_model or "gpt-4o-mini"
@@ -1287,7 +1303,7 @@ def generate_shorts_metadata(filename: str, transcript: str = "") -> dict:
     # Context transcript strictly limited to selected clip
     context_transcript = transcript.strip()[:3500] if transcript else clean_filename_fallback(filename)
 
-    prompt = f"""You are an elite YouTube Shorts audience retention and packaging specialist.
+    prompt = f"""You are an elite YouTube Shorts audience retention and metadata specialist.
 Below is the exact transcript spoken in the selected clip:
 
 Transcript:
@@ -1296,55 +1312,24 @@ Transcript:
 \"\"\"
 
 Task:
-Analyze ONLY this clip transcript and generate a high-retention, strictly grounded content packaging system:
-HOOK + TITLE + DESCRIPTION + HASHTAGS
+Analyze ONLY this clip transcript and generate candidate titles, descriptions, and hashtags.
 
 Rules:
-1. CLIP CONTENT ANALYSIS:
-   Identify core topic, central proposition, strongest claim, surprising element, curiosity gap, consequence, contrast, numbers, and payoff.
-2. 5 HOOK CANDIDATES (3 to 8 words, maximum 42 characters):
-   - Distinct strategies: curiosity, contrarian, question, consequence, specific_fact.
-   - Emoji Policy: 0–2 emojis max (prefer 1 semantically relevant emoji; 2 only when both independently reinforce concepts; 0 when unnecessary; no emoji chains like '👀🔥', no duplicates like '💰💰').
-   - Include supporting_text copied verbatim from clip transcript.
-3. 5 TITLE CANDIDATES (5 to 12 words, 35 to 70 characters, max 1 emoji):
+1. 5 TITLE CANDIDATES (5 to 12 words, 35 to 70 characters, max 1 emoji):
    - Distinct strategies: specific_explanation, curiosity_topic, mechanism, consequence, number_data.
-   - Must complement the hook without duplicating or repeating it.
-4. 5 DESCRIPTION CANDIDATES (1 to 2 natural sentences, micro-teaser style):
-   - Grounded in clip; hints at payoff without regurgitating title or hook.
-   - Avoid generic summary boilerplate ('In this clip...', 'This video explains...').
-5. HASHTAGS: 4 to 6 hashtags starting with #Shorts followed by topical clip tags (no spam like #viral, #fyp).
-6. TAGS: 5 to 8 search keywords.
+   - Grounded strictly in the clip transcript; no generic clickbait.
+2. 5 DESCRIPTION CANDIDATES (1 to 2 natural sentences, micro-teaser style):
+   - Grounded in clip; hints at payoff without regurgitating title.
+   - Avoid generic boilerplate ('In this clip...', 'This video explains...').
+3. HASHTAGS: 4 to 6 hashtags starting with #Shorts followed by topical keywords (no spam like #viral, #fyp).
+4. TAGS: 5 to 8 search keywords.
 
 Respond ONLY with valid JSON in this exact structure:
 {{
-  "content_analysis": {{
-    "core_topic": "...",
-    "strongest_claim": "...",
-    "surprising_element": "...",
-    "curiosity_gap": "...",
-    "consequence": "...",
-    "contrast": "...",
-    "numbers": "...",
-    "payoff": "...",
-    "memorable_phrase": "..."
-  }},
-  "hook_candidates": [
-    {{
-      "hook": "SPECIFIC GROUNDED HOOK (UPPERCASE)",
-      "hook_type": "curiosity | contrarian | question | consequence | specific_fact",
-      "supporting_text": "verbatim excerpt from clip",
-      "supported_by_clip": true
-    }}
-  ],
   "title_candidates": [
     {{
       "title": "Natural Engaging Title Here",
-      "strategy": "specific_explanation | curiosity_topic | mechanism | consequence | number_data",
-      "grounding_score": 9.0,
-      "specificity_score": 8.5,
-      "curiosity_score": 8.5,
-      "relevance_score": 9.0,
-      "clarity_score": 9.0
+      "strategy": "specific_explanation | curiosity_topic | mechanism | consequence | number_data"
     }}
   ],
   "description_candidates": [
@@ -1353,11 +1338,6 @@ Respond ONLY with valid JSON in this exact structure:
       "strategy": "micro_teaser"
     }}
   ],
-  "punchline": "Primary Top Hook Here",
-  "title_1": "Primary Title Here",
-  "title_2": "Variant Title 2",
-  "title_3": "Variant Title 3",
-  "description": "Primary description here.",
   "hashtags": ["#Shorts", "#Topic1", "#Topic2", "#Topic3"],
   "tags": ["tag1", "tag2"]
 }}
@@ -1373,12 +1353,19 @@ Respond ONLY with valid JSON in this exact structure:
                 "Requesting AI metadata generation (model=%s, attempt=%d/3, transcript_len=%d)...",
                 model, attempt, len(context_transcript),
             )
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                max_tokens=2200,
-                response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+            def _meta_call():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6,
+                    max_tokens=1200,
+                    response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+                )
+
+            response = call_with_rate_limit(
+                client_fn=_meta_call,
+                prompt_or_messages=[{"role": "user", "content": prompt}],
+                max_tokens=1200,
             )
             choice = response.choices[0] if (response and getattr(response, "choices", None)) else None
             if not choice:
@@ -1394,6 +1381,9 @@ Respond ONLY with valid JSON in this exact structure:
 
             data = extract_json_payload(content)
             if data and isinstance(data, dict):
+                has_titles = bool(data.get("title_candidates") or any(k in data for k in ("title_1", "title")))
+                if not has_titles:
+                    raise ValueError("AI metadata response missing required title candidates")
                 log.info("Successfully received and parsed AI metadata response on attempt %d.", attempt)
                 break
         except Exception as e:
@@ -1433,6 +1423,7 @@ Respond ONLY with valid JSON in this exact structure:
             "title_strategy": "fallback",
             "description_strategy": "fallback",
             "is_fallback": True,
+            "fallback_reason": f"AI metadata generation failed: {last_error}",
         }
 
     # Check if response is a legacy payload (e.g. from test_successful_ai_metadata_response which tests title_1)
@@ -1493,19 +1484,27 @@ Respond ONLY with valid JSON in this exact structure:
 
     # --- Modern Package-Level Pipeline ---
     # 1. Extract Hook Candidates
-    raw_hook_cands = data.get("hook_candidates")
+    raw_hook_cands = hook_candidates or data.get("hook_candidates")
     if not isinstance(raw_hook_cands, list) or not raw_hook_cands:
-        raw_punchline = str(data.get("punchline", "")).strip()
-        if raw_punchline:
+        if hook:
             raw_hook_cands = [{
-                "hook": raw_punchline,
+                "hook": hook,
                 "hook_type": "curiosity",
                 "supported_by_clip": True,
                 "supporting_text": "",
             }]
         else:
-            fb_h = hook_generator.get_fallback_hook(transcript=transcript)
-            raw_hook_cands = [fb_h]
+            raw_punchline = str(data.get("punchline", "")).strip()
+            if raw_punchline:
+                raw_hook_cands = [{
+                    "hook": raw_punchline,
+                    "hook_type": "curiosity",
+                    "supported_by_clip": True,
+                    "supporting_text": "",
+                }]
+            else:
+                fb_h = hook_generator.get_fallback_hook(transcript=transcript)
+                raw_hook_cands = [fb_h]
 
     # 2. Extract Title Candidates
     raw_title_cands = data.get("title_candidates")
@@ -1674,6 +1673,7 @@ Respond ONLY with valid JSON in this exact structure:
         "title_strategy": title_strategy,
         "description_strategy": desc_strategy,
         "is_fallback": False if best_pkg else True,
+        "fallback_reason": "" if best_pkg else "Candidate packages failed quality validation",
     }
 
 

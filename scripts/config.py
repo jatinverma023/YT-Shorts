@@ -40,12 +40,23 @@ MAX_DISCOVERY_CANDIDATES = int(os.environ.get("MAX_DISCOVERY_CANDIDATES", "100")
 MIN_CLIP_QUALITY_SCORE = float(os.environ.get("MIN_CLIP_QUALITY_SCORE", "70.0"))
 CLIP_OVERLAP_THRESHOLD = float(os.environ.get("CLIP_OVERLAP_THRESHOLD", "0.35"))
 MIN_STANDALONE_SCORE = float(os.environ.get("MIN_STANDALONE_SCORE", "7.0"))
+DISCOVERY_CHUNK_MAX_CHARS = int(os.environ.get("DISCOVERY_CHUNK_MAX_CHARS", "8000"))
+DISCOVERY_CHUNK_OVERLAP_SECONDS = float(os.environ.get("DISCOVERY_CHUNK_OVERLAP_SECONDS", "65.0"))
+
 
 
 # --- Transcription & LLM (Groq Whisper-large-v3 or OpenAI Whisper) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY", "") or GROQ_API_KEY).strip()
-GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", "").strip()
+DEFAULT_GROQ_CHAT_MODEL = "llama-3.3-70b-versatile"
+GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", DEFAULT_GROQ_CHAT_MODEL).strip()
+
+# --- AI Provider Rate Limiting & Token Budgeting ---
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "8000"))
+GROQ_REQUEST_MARGIN = float(os.environ.get("GROQ_REQUEST_MARGIN", "0.85"))
+GROQ_MIN_REQUEST_DELAY = float(os.environ.get("GROQ_MIN_REQUEST_DELAY", "0.5"))
+GROQ_MAX_429_RETRIES = int(os.environ.get("GROQ_MAX_429_RETRIES", "3"))
+GROQ_MAX_429_BACKOFF = float(os.environ.get("GROQ_MAX_429_BACKOFF", "65.0"))
 
 # --- YouTube upload (OAuth2, not service account — YT upload needs a real user) ---
 YT_CLIENT_ID = os.environ.get("YT_CLIENT_ID", "").strip()

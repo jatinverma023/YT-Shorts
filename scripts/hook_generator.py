@@ -28,7 +28,8 @@ from typing import Dict, List, Optional, Tuple, Set
 from openai import OpenAI
 import config
 from config import GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL
-from clip_detection import _get_best_groq_model
+from clip_detection import _get_best_groq_model, _resolve_groq_model
+from ai_rate_limiter import call_with_rate_limit
 
 log = logging.getLogger("hook_generator")
 
@@ -331,10 +332,22 @@ def is_filename_or_title_leak(hook_text: str, filename: str = "", source_title: 
     return False
 
 
+HANGING_WORDS = {
+    "with", "and", "or", "the", "a", "an", "is", "are", "was", "were",
+    "to", "in", "of", "for", "on", "at", "by", "from", "that", "this",
+    "which", "because", "but", "so", "if", "when", "then", "than", "as",
+    "like", "into", "about", "ki", "ka", "ke", "ko", "se", "mein", "par",
+}
+
+
 def extract_grounded_fallback_hook(transcript: str, detected_lang: str = "en") -> Tuple[str, str]:
     """
     Extracts a clean, punchy, transcript-grounded hook directly from the clip transcript
     when LLM generation is unavailable or fails.
+    Guarantees:
+    - Never fabricates claims or introduces terms not in transcript.
+    - Rejects incomplete/open-ended clauses ending with hanging conjunctions or prepositions.
+    - Validates claim strength before selection.
     Returns (hook_text, supporting_text).
     """
     if not transcript or not transcript.strip():
@@ -342,37 +355,52 @@ def extract_grounded_fallback_hook(transcript: str, detected_lang: str = "en") -
 
     # Split into candidate clauses by punctuation
     raw_clauses = re.split(r"[.!?,\n;]+", transcript)
-    clean_clauses = [c.strip() for c in raw_clauses if c.strip()]
+    clean_clauses = []
+    for c in raw_clauses:
+        c_clean = c.strip()
+        if not c_clean:
+            continue
+        # Strip leading conversational conjunctions if present
+        c_clean = re.sub(r"^(and|but|so|because|or)\s+", "", c_clean, flags=re.IGNORECASE).strip()
+        if c_clean:
+            clean_clauses.append(c_clean)
+
+    def _is_clause_standalone(c_text: str) -> bool:
+        words = c_text.split()
+        if not (3 <= len(words) <= 8 and len(c_text) <= MAX_HOOK_CHARS):
+            return False
+        if words[-1].lower() in HANGING_WORDS:
+            return False
+        if is_forbidden_generic_hook(c_text, transcript=transcript):
+            return False
+        is_claim_valid, _ = validate_claim_strength(c_text, supporting_text=c_text, transcript=transcript)
+        if not is_claim_valid:
+            return False
+        return True
 
     # 1. Prefer questions if any exist in the clip transcript
     for c in clean_clauses:
-        words = c.split()
-        if 3 <= len(words) <= 8 and len(c) <= MAX_HOOK_CHARS:
-            last = words[-1].lower()
-            if last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
-                first = words[0].lower()
-                if first in {"why", "how", "what", "is", "can", "kya", "kyun", "kaise"} or "?" in c:
-                    hook = c.upper()
-                    if not hook.endswith("?"):
-                        hook += "?"
-                    return hook, c
+        if _is_clause_standalone(c):
+            words = c.split()
+            first = words[0].lower()
+            if first in {"why", "how", "what", "is", "can", "kya", "kyun", "kaise"} or "?" in c:
+                hook = c.upper()
+                if not hook.endswith("?"):
+                    hook += "?"
+                return hook, c
 
     # 2. Look for any standalone clause with 3-8 words and <= 42 chars
     for c in clean_clauses:
-        words = c.split()
-        if 3 <= len(words) <= 8 and len(c) <= MAX_HOOK_CHARS:
-            last = words[-1].lower()
-            if last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
-                return c.upper(), c
+        if _is_clause_standalone(c):
+            return c.upper(), c
 
-    # 3. Take the first clause and slice to 3-6 words <= 42 chars
+    # 3. Take the first clause and slice to 3-6 words <= 42 chars if standalone
     if clean_clauses:
         first_clause = clean_clauses[0]
         words = first_clause.split()
         for count in range(min(7, len(words)), 2, -1):
             sub = " ".join(words[:count])
-            last = words[count - 1].lower()
-            if len(sub) <= MAX_HOOK_CHARS and last not in {"with", "and", "or", "the", "a", "an", "is", "ki", "ka", "ke", "ko"}:
+            if _is_clause_standalone(sub):
                 return sub.upper(), sub
 
     return ("", "")
@@ -747,6 +775,8 @@ def get_fallback_hook(transcript: str = "", detected_lang: str = "en", hook_summ
             "score": 75.0,
             "source": "fallback_transcript",
             "supported_by_clip": True,
+            "is_fallback": True,
+            "fallback_reason": "Grounded fallback hook from transcript",
         }
 
     lang = (detected_lang or "en").lower()
@@ -761,6 +791,8 @@ def get_fallback_hook(transcript: str = "", detected_lang: str = "en", hook_summ
         "score": 70.0,
         "source": "fallback",
         "supported_by_clip": True,
+        "is_fallback": True,
+        "fallback_reason": "Neutral inquiry fallback",
     }
 
 
@@ -830,38 +862,44 @@ Respond ONLY with a valid JSON object containing exactly 5 candidates in this sc
     {{
       "hook": "SPECIFIC GROUNDED HOOK (UPPERCASE)",
       "hook_type": "curiosity | contrarian | question | consequence | specific_fact",
-      "supporting_text": "exact verbatim excerpt from the transcript supporting this hook",
-      "supported_by_clip": true,
-      "grounding_reason": "brief explanation of how this hook reflects the clip's actual idea",
-      "curiosity_score": 8.5,
-      "specificity_score": 9.0,
-      "relevance_score": 9.0,
-      "clarity_score": 8.5,
-      "grounding_score": 9.5
+      "supporting_text": "exact verbatim excerpt from the transcript supporting this hook"
     }}
   ]
 }}
 """
 
+    def _api_call():
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.60,
+            max_tokens=1200,
+            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+        )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.60,
-        max_tokens=850,
-        response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
-    )
+    try:
+        response = call_with_rate_limit(
+            client_fn=_api_call,
+            prompt_or_messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+        )
+        choice = response.choices[0] if (response and getattr(response, "choices", None)) else None
+        if not choice or getattr(choice, "finish_reason", None) == "length":
+            log.warning("Hook generation response was truncated or missing choices.")
+            return []
 
-    content = response.choices[0].message.content.strip()
-    content = re.sub(r"^```json\s*", "", content)
-    content = re.sub(r"\s*```$", "", content)
-    data = json.loads(content)
+        content = choice.message.content.strip() if choice.message else ""
+        content = re.sub(r"^```json\s*", "", content)
+        content = re.sub(r"\s*```$", "", content)
+        data = json.loads(content)
 
-    candidates = data.get("candidates", [])
-    if not isinstance(candidates, list):
-        return []
+        candidates = data.get("candidates", [])
+        if isinstance(candidates, list):
+            return candidates
+    except Exception as e:
+        log.warning("LLM hook candidate generation failed: %s", e)
 
-    return candidates
+    return []
 
 
 def generate_short_hook(
@@ -896,13 +934,15 @@ def generate_short_hook(
             "score": fb["score"],
             "candidates": [fb],
             "source": "fallback",
+            "is_fallback": True,
+            "fallback_reason": fb.get("fallback_reason", "No AI API key found"),
         }
 
     # Initialize client
     try:
         if api_key.startswith("gsk_") or GROQ_API_KEY:
             client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-            model = GROQ_CHAT_MODEL or _get_best_groq_model(client)
+            model = _resolve_groq_model(client, configured_model=GROQ_CHAT_MODEL)
         else:
             client = OpenAI(api_key=api_key)
             model = "gpt-4o-mini"
@@ -916,6 +956,8 @@ def generate_short_hook(
             "score": fb["score"],
             "candidates": [fb],
             "source": "fallback",
+            "is_fallback": True,
+            "fallback_reason": fb.get("fallback_reason", f"Could not initialize AI client: {e}"),
         }
 
     def process_batch(candidates: List[dict]) -> List[dict]:
@@ -992,6 +1034,8 @@ def generate_short_hook(
             "score": best["score"],
             "candidates": validated_candidates,
             "source": "ai",
+            "is_fallback": False,
+            "fallback_reason": "",
         }
 
     # If all candidates failed validation across both batches, use safe transcript-grounded fallback
@@ -1004,4 +1048,6 @@ def generate_short_hook(
         "score": fb["score"],
         "candidates": [fb],
         "source": "fallback",
+        "is_fallback": True,
+        "fallback_reason": fb.get("fallback_reason", "All LLM hook candidates failed validation"),
     }

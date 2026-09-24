@@ -9,14 +9,27 @@ import re
 from openai import OpenAI
 
 from config import (
-    GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL,
+    GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL, DEFAULT_GROQ_CHAT_MODEL,
     MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, MAX_CLIPS_PER_VIDEO,
     MAX_DISCOVERY_CANDIDATES,
     MIN_CLIP_QUALITY_SCORE, CLIP_OVERLAP_THRESHOLD,
     MIN_STANDALONE_SCORE,
+    DISCOVERY_CHUNK_MAX_CHARS, DISCOVERY_CHUNK_OVERLAP_SECONDS,
 )
+from ai_rate_limiter import call_with_rate_limit, shared_rate_limiter
 
 log = logging.getLogger("clip_detection")
+
+
+class ClipDiscoveryError(RuntimeError):
+    """Raised when AI multi-clip discovery fails at the API/LLM or infrastructure level."""
+    pass
+
+
+class ModelConfigurationError(ValueError):
+    """Raised when an explicit model configuration is invalid or unavailable from the provider."""
+    pass
+
 
 # 8-dimension weights summing exactly to 1.00 (100%)
 SCORING_WEIGHTS = {
@@ -202,25 +215,44 @@ def calculate_quality_score(scores: dict) -> float:
     return round(max(0.0, min(100.0, composite)), 1)
 
 
-def _get_best_groq_model(client):
-    preferred = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
-        "llama3-70b-8192",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-    ]
-    try:
-        models = [m.id for m in client.models.list().data]
-        for p in preferred:
-            if p in models:
-                return p
-        for m in models:
-            if "whisper" not in m.lower() and "guard" not in m.lower():
-                return m
-    except Exception:
-        pass
-    return "llama-3.3-70b-versatile"
+def _resolve_groq_model(client, configured_model: str = None) -> str:
+    """
+    Resolves and verifies the production Groq chat model.
+    1. Uses explicit configured_model (or GROQ_CHAT_MODEL from config/environment).
+    2. Falls back to documented DEFAULT_GROQ_CHAT_MODEL ('llama-3.3-70b-versatile').
+    3. Verifies that the model exists in the provider's active model list.
+    4. If the model does not exist: fails fast with ModelConfigurationError.
+       NEVER silently substitutes an arbitrary model.
+    """
+    model = (configured_model or GROQ_CHAT_MODEL or "").strip()
+    if not model:
+        model = DEFAULT_GROQ_CHAT_MODEL
+
+    # Verify model availability against provider model-list API if client is available
+    if client and hasattr(client, "models") and hasattr(client.models, "list"):
+        try:
+            available_models = [m.id for m in client.models.list().data]
+            if available_models and model not in available_models:
+                log.error(
+                    "[MODEL_CONFIG_ERROR] Configured Groq model '%s' is not available. Available models: %s",
+                    model, available_models,
+                )
+                raise ModelConfigurationError(
+                    f"Configured Groq model '{model}' does not exist on provider. Available: {available_models}"
+                )
+        except ModelConfigurationError:
+            raise
+        except Exception as e:
+            # Network issue or mock during testing without models.list response
+            log.warning("Could not verify model '%s' with provider model list: %s", model, e)
+
+    log.info("[MODEL_CONFIG] Using verified production Groq model: '%s'", model)
+    return model
+
+
+def _get_best_groq_model(client, configured_model: str = None) -> str:
+    """Backward-compatible wrapper for _resolve_groq_model."""
+    return _resolve_groq_model(client, configured_model=configured_model)
 
 
 def _get_llm_client():
@@ -229,7 +261,7 @@ def _get_llm_client():
         return None, None
     if api_key.startswith("gsk_") or GROQ_API_KEY:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-        model = GROQ_CHAT_MODEL or _get_best_groq_model(client)
+        model = _resolve_groq_model(client, configured_model=GROQ_CHAT_MODEL)
         return client, model
     return OpenAI(api_key=api_key), "gpt-4o-mini"
 
@@ -245,7 +277,11 @@ def _format_segments_to_lines(segments: list) -> list:
     return lines
 
 
-def _split_lines_into_chunks(lines: list, max_chars: int = 14000, overlap_seconds: float = 75.0) -> list:
+def _split_lines_into_chunks(
+    lines: list,
+    max_chars: int = DISCOVERY_CHUNK_MAX_CHARS,
+    overlap_seconds: float = DISCOVERY_CHUNK_OVERLAP_SECONDS,
+) -> list:
     """
     Splits transcript timestamp lines into content-aware overlapping chunks.
     Preserves enough neighboring context across boundaries so complete talk segments
@@ -294,38 +330,26 @@ def _detect_clips_llm(
 ) -> list:
     """
     Prompts the LLM to identify meaningful, coherent talk/topic segments and return
-    potential standalone Short candidates.
+    potential standalone Short candidates using a compact, rate-limit friendly schema.
     """
     prompt = f"""You are an elite YouTube Shorts editor and conversational analyst.
 Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
 
 DISCOVERY OBJECTIVE:
-Analyze the transcript as a sequence of meaningful discussions, topics, or talks.
-A "talk segment" is a coherent portion of the conversation where the speaker is discussing ONE understandable subject, question, story, argument, explanation, experience, or insight.
+Identify coherent talk segments ({min_clip_seconds}s to {max_clip_seconds}s) with high standalone potential.
+Each Short must be self-contained:
+1. Setup: Clear context without needing prior context.
+2. Core Insight: One clear argument, insight, explanation, or story.
+3. Payoff: Satisfying conclusion, resolution, or takeaway.
 
-For each talk segment with high standalone potential, identify candidate clip boundaries ({min_clip_seconds}s to {max_clip_seconds}s) representing that conversational unit.
+AVOID: Greetings, sponsor reads, incomplete answers, setup without payoff, or clips requiring outside context.
 
-Each Short must contain a complete micro-narrative:
-1. CONTEXT: What is being discussed? Clean, understandable setup without requiring prior 2 minutes.
-2. CORE IDEA / EXPLANATION: What is the actual point, argument, insight, or story?
-3. PAYOFF / CONCLUSION: What is the satisfying answer, surprising conclusion, or memorable punchline?
-
-CANDIDATE MOMENTS TO LOOK FOR:
-- Strong explanations, surprising facts, useful advice
-- Controversial but supported statements, personal experiences, mini-stories
-- Questions with satisfying answers, cause/effect explanations, surprising conclusions
-
-AVOID:
-- Greetings, welcomes, sponsor reads, advertisements, repeated statements
-- Incomplete answers, setup without payoff, payoff without necessary setup
-- Random sentences, clips requiring outside visual/verbal context
-
-Do NOT force a target number of clips. Return ONLY genuinely strong standalone moments. If none meet standards, return an empty list.
+Return ONLY genuinely strong standalone moments. If none meet standards, return an empty list.
 
 Requirements:
 1. Each clip MUST be between {min_clip_seconds} and {max_clip_seconds} seconds long.
 2. All start and end timestamps MUST be within 0.0 and {total_duration:.1f} seconds.
-3. Standalone score (0-10): 9-10=completely understandable independently; 7-8=mostly self-contained; 5-6=some missing context; 0-4=cannot understand without outside context.
+3. Standalone score (0-10): >=7 is self-contained; <7 requires outside context.
 
 Transcript:
 {transcript_text}
@@ -334,13 +358,10 @@ Respond ONLY with valid JSON in this exact structure:
 {{
   "clips": [
     {{
-      "topic": "Why most startups fail",
       "start": 12.5,
       "end": 54.0,
-      "duration": 41.5,
+      "topic": "Why most startups fail",
       "topic_summary": "Explains why morning screen time ruins focus and what to do instead.",
-      "opening_context": "Introduction of the morning habit problem.",
-      "payoff_summary": "Clear solution on dopamine reset.",
       "title_idea": "The Morning Habit Destroying Your Brain #shorts",
       "punchline": "Stop Ruining Your Mornings 🛑",
       "standalone": true,
@@ -349,7 +370,6 @@ Respond ONLY with valid JSON in this exact structure:
       "missing_payoff": false,
       "critical_unresolved_reference": false,
       "unresolved_references": [],
-      "standalone_reason": "Topic is introduced and fully resolved within the segment.",
       "quality_scores": {{
         "hook_strength": 9,
         "standalone_clarity": 10,
@@ -360,18 +380,25 @@ Respond ONLY with valid JSON in this exact structure:
         "context_independence": 8,
         "punchline_memorable_moment": 9
       }},
-      "reason": "Strong standalone hook with clear setup and payoff."
+      "reason": "Clear standalone hook with setup and payoff."
     }}
   ]
 }}
 """
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=2000,
-            response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+        def _api_call():
+            return client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=1500,
+                response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
+            )
+
+        response = call_with_rate_limit(
+            client_fn=_api_call,
+            prompt_or_messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
         )
         content = response.choices[0].message.content.strip()
         content = re.sub(r"^```json\s*", "", content)
@@ -437,15 +464,20 @@ def detect_clips_from_transcript(
 
     client, model = _get_llm_client()
     if not client or not segments:
-        log.warning("No LLM client or empty segments. Falling back to default initial clip.")
-        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
+        log.warning("No LLM client or empty segments. AI discovery failed.")
+        raise ClipDiscoveryError("AI clip discovery failed: No LLM client available or empty transcript segments.")
 
     lines = _format_segments_to_lines(segments)
     if not lines:
-        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
+        log.warning("No formatted transcript lines. AI discovery failed.")
+        raise ClipDiscoveryError("AI clip discovery failed: No formatted transcript lines available.")
 
     # Content-aware chunking for long-form video scale
-    chunks = _split_lines_into_chunks(lines, max_chars=14000, overlap_seconds=75.0)
+    chunks = _split_lines_into_chunks(
+        lines,
+        max_chars=DISCOVERY_CHUNK_MAX_CHARS,
+        overlap_seconds=DISCOVERY_CHUNK_OVERLAP_SECONDS,
+    )
     all_raw_clips = []
     any_success = False
 
@@ -464,8 +496,8 @@ def detect_clips_from_transcript(
             all_raw_clips.extend(raw_chunk_clips)
 
     if not any_success:
-        log.warning("AI clip detection failed across all transcript chunks. Using fallback clips.")
-        return _fallback_clips(total_duration, min_clip_seconds, max_clip_seconds, max_clips or MAX_CLIPS_PER_VIDEO)
+        log.warning("AI clip detection failed across all transcript chunks. Returning zero valid clips.")
+        raise ClipDiscoveryError("AI clip discovery failed across all transcript chunks (all LLM calls failed).")
 
     # Globally run quality filtering, standalone validation, and deduplication across all chunks
     validated = _validate_and_filter_clips(
@@ -639,6 +671,8 @@ def _validate_and_filter_clips(
             "missing_payoff": bool(item.get("missing_payoff", False)),
             "critical_unresolved_reference": bool(item.get("critical_unresolved_reference", False)),
             "standalone_reason": standalone_reason,
+            "is_fallback": False,
+            "discovery_status": "SUCCESS",
         }
 
         candidates.append(candidate)

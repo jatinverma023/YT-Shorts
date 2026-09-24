@@ -70,9 +70,13 @@ class PipelineRunReport:
         self.end_time: Optional[datetime.datetime] = None
         self.trigger = trigger or os.environ.get("GITHUB_TRIGGER", "manual / local")
 
-        # 1. Overall Status: SUCCESS 🟢 | PARTIAL FAILURE ⚠️ | FAILED 🔴 | NOTHING TO PROCESS 🔵
+        # 1. Overall Status: SUCCESS 🟢 | DEGRADED ⚠️ | FALLBACK ⚠️ | PARTIAL FAILURE ⚠️ | FAILED 🔴 | NOTHING TO PROCESS 🔵
         self.overall_status = "NOTHING TO PROCESS 🔵"
         self._manual_status: Optional[str] = None
+        self.is_fallback = False
+        self.fallback_count = 0
+        self.fallback_reasons: List[str] = []
+        self.discovery_status = "N/A"
 
         # 2. Source Information
         self.source_filename = "N/A"
@@ -193,25 +197,38 @@ class PipelineRunReport:
         })
         log.warning("[REPORT_ERROR] Stage: %s | Type: %s | Msg: %s", stage, error_type, clean_msg)
 
+    def record_fallback(self, component: str, reason: str):
+        """Records that a subsystem fell back to a deterministic or degraded generator."""
+        self.is_fallback = True
+        self.fallback_count += 1
+        self.fallback_reasons.append(f"{component}: {reason}")
+
+    def set_discovery_status(self, status: str):
+        """Sets explicit discovery status (e.g. SUCCESS, FAILED, NO_VALID_CLIPS)."""
+        self.discovery_status = status
+
     def set_overall_status(self, status: str):
         """Explicitly sets the overall status override."""
         self._manual_status = status
         self.overall_status = status
 
-    def determine_overall_status(self):
-        """Calculates the overall status based on clips, errors, and discovery state."""
+    def determine_overall_status(self) -> str:
+        """Calculates the overall status based on clips, errors, fallbacks, and discovery state."""
         if self._manual_status:
             # If manual status is set, only override if errors were recorded that make it FAILED
             if self.errors and "FAILED" not in self._manual_status and "PARTIAL" not in self._manual_status:
                 self.overall_status = "FAILED 🔴"
             else:
                 self.overall_status = self._manual_status
-            return
+            return self.overall_status
 
         # 1. Fatal discovery or pipeline errors with 0 uploads
-        if any(e.get("stage") in ("discovery", "audio_check", "download", "pipeline") for e in self.errors) and self.summary_uploaded == 0:
+        if self.discovery_status == "FAILED" or (
+            any(e.get("stage") in ("discovery", "audio_check", "download", "pipeline") for e in self.errors)
+            and self.summary_uploaded == 0
+        ):
             self.overall_status = "FAILED 🔴"
-            return
+            return self.overall_status
 
         # 2. Clips were processed
         total = self.summary_total_clips or len(self.clips)
@@ -220,7 +237,10 @@ class PipelineRunReport:
 
         if total > 0:
             if uploaded > 0 and failed == 0:
-                self.overall_status = "SUCCESS 🟢"
+                if self.is_fallback:
+                    self.overall_status = "DEGRADED ⚠️"
+                else:
+                    self.overall_status = "SUCCESS 🟢"
             elif uploaded > 0 and failed > 0:
                 self.overall_status = "PARTIAL FAILURE ⚠️"
             elif uploaded == 0 and failed > 0:
@@ -231,6 +251,8 @@ class PipelineRunReport:
             self.overall_status = "FAILED 🔴"
         else:
             self.overall_status = "NOTHING TO PROCESS 🔵"
+
+        return self.overall_status
 
     def get_github_run_url(self) -> str:
         """Constructs GitHub Actions run URL if running inside GitHub Actions CI."""
@@ -287,6 +309,15 @@ class PipelineRunReport:
             f"• Candidates: `{self.candidate_clips_count}` | Qualified: `{self.qualified_clips_count}`",
             f"• Filtering: {self.filtering_results}",
         ]
+
+        if self.discovery_status != "N/A":
+            lines.append(f"• Discovery Status: `{self.discovery_status}`")
+
+        if self.fallback_reasons:
+            lines.append("")
+            lines.append(f"⚠️ *Fallbacks Used ({len(self.fallback_reasons)}):*")
+            for fb in self.fallback_reasons[:5]:
+                lines.append(f"• `{fb}`")
 
         # Per-clip details
         if self.clips:

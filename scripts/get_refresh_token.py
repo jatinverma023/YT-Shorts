@@ -19,26 +19,35 @@ import os
 import sys
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-
-candidates = [
-    "client_secret.json",
-    os.path.join(os.path.dirname(__file__), "client_secret.json"),
-    os.path.join(os.path.dirname(__file__), "..", "client_secret.json"),
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
-client_secret_path = next((p for p in candidates if os.path.isfile(p)), None)
+def main():
+    candidates = [
+        "client_secret.json",
+        os.path.join(os.path.dirname(__file__), "client_secret.json"),
+        os.path.join(os.path.dirname(__file__), "..", "client_secret.json"),
+    ]
 
-if not client_secret_path:
-    print("\n[ERROR] 'client_secret.json' not found.")
-    print("Please download your OAuth Desktop Client secret file from Google Cloud Console,")
-    print("rename it to 'client_secret.json', and place it in the project directory.")
-    sys.exit(1)
+    client_secret_path = next((p for p in candidates if os.path.isfile(p)), None)
 
-flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
-creds = flow.run_local_server(port=0)
+    if not client_secret_path:
+        print("\n[ERROR] 'client_secret.json' not found.")
+        print("Please download your OAuth Desktop Client secret file from Google Cloud Console,")
+        print("rename it to 'client_secret.json', and place it in the project directory.")
+        sys.exit(1)
 
-print("\n--- SAVE THESE AS GITHUB SECRETS ---")
-print("YT_CLIENT_ID     =", creds.client_id)
-print("YT_CLIENT_SECRET =", creds.client_secret)
-print("YT_REFRESH_TOKEN =", creds.refresh_token)
+    flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
+    creds = flow.run_local_server(port=0)
+
+    print("\n--- SAVE THESE AS GITHUB SECRETS ---")
+    print("YT_CLIENT_ID     =", creds.client_id)
+    print("YT_CLIENT_SECRET =", creds.client_secret)
+    print("YT_REFRESH_TOKEN =", creds.refresh_token)
+
+
+if __name__ == "__main__":
+    main()
+
