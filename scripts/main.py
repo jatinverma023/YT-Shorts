@@ -347,6 +347,14 @@ def process_next_pending_clip(
             log.info("No eligible pending clips found to process.")
             if drive_file_id and video_name:
                 check_and_move_if_completed(drive_service, drive_file_id, video_name)
+            report = run_report.get_current_report()
+            if report:
+                if drive_file_id:
+                    counts = sheet_log.get_video_clip_counts(drive_file_id, service=None)
+                    report.summary_pending = counts.get("pending", 0)
+                    report.summary_total_clips = counts.get("total", 0)
+                else:
+                    report.summary_pending = 0
             return {"total_queued": 0, "uploaded": 0, "failed": 0, "urls": [], "errors": []}
         row_number, clip = pending
 
@@ -385,11 +393,12 @@ def process_next_pending_clip(
 
     report = run_report.get_current_report()
     if report:
-        report.summary_total_clips = 1
+        counts = sheet_log.get_video_clip_counts(drive_file_id, service=None) if drive_file_id else {}
+        total_in_queue = counts.get("total", 0)
+        report.summary_total_clips = total_in_queue if total_in_queue > 0 else (report.summary_total_clips or 1)
         report.summary_uploaded = stats["uploaded"]
         report.summary_failed = stats["failed"]
         report.summary_completed = stats["uploaded"]
-        counts = sheet_log.get_video_clip_counts(drive_file_id, service=None)
         report.summary_pending = counts.get("pending", 0)
 
     return stats
@@ -581,16 +590,23 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
                 )
 
         # 3. Persist ALL detected clips into durable Google Sheets queue
+        discovered_count = len(clips)
         sheet_log.enqueue_clips(file_id, name, clips)
         if report:
             report.update_stage("sheets_update", "✅ Enqueued")
+            report.summary_total_clips = discovered_count
+            report.summary_pending = discovered_count
         notify.send(
-            f"🎬 Discovered {len(clips)} clip(s) for '{name}' (Duration: {int(total_duration)}s). Enqueued in queue."
+            f"🎬 Discovered {discovered_count} clip(s) for '{name}' (Duration: {int(total_duration)}s). Enqueued in queue."
         )
 
         # 4. STRICT ONE-CLIP PRODUCTION: Process ONLY ONE clip in this initial run!
         # Reuses the downloaded source video locally. Remaining clips stay pending for future triggers.
         stats = process_next_pending_clip(drive_service, drive_file_id=file_id, video_name=name, local_src_path=src_path)
+        stats["total_queued"] = discovered_count
+        stats["enqueued"] = discovered_count
+        if report:
+            report.summary_total_clips = discovered_count
         return stats
 
     except Exception as e:

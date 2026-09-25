@@ -336,7 +336,7 @@ def _detect_clips_llm(
 Analyze the timestamped transcript below from a video of total duration {total_duration:.1f} seconds.
 
 DISCOVERY OBJECTIVE:
-Identify coherent talk segments ({min_clip_seconds}s to {max_clip_seconds}s) with high standalone potential.
+Identify at most 3 of the strongest coherent talk segments ({min_clip_seconds}s to {max_clip_seconds}s) with high standalone potential.
 Each Short must be self-contained:
 1. Setup: Clear context without needing prior context.
 2. Core Insight: One clear argument, insight, explanation, or story.
@@ -344,12 +344,13 @@ Each Short must be self-contained:
 
 AVOID: Greetings, sponsor reads, incomplete answers, setup without payoff, or clips requiring outside context.
 
-Return ONLY genuinely strong standalone moments. If none meet standards, return an empty list.
+Return at most 3 genuinely strong standalone moments (or an empty list if none meet standards).
 
 Requirements:
-1. Each clip MUST be between {min_clip_seconds} and {max_clip_seconds} seconds long.
-2. All start and end timestamps MUST be within 0.0 and {total_duration:.1f} seconds.
-3. Standalone score (0-10): >=7 is self-contained; <7 requires outside context.
+1. Return AT MOST 3 candidate clips.
+2. Each clip MUST be between {min_clip_seconds} and {max_clip_seconds} seconds long.
+3. All start and end timestamps MUST be within 0.0 and {total_duration:.1f} seconds.
+4. Standalone score (0-10): >=7 is self-contained; <7 requires outside context.
 
 Transcript:
 {transcript_text}
@@ -370,16 +371,6 @@ Respond ONLY with valid JSON in this exact structure:
       "missing_payoff": false,
       "critical_unresolved_reference": false,
       "unresolved_references": [],
-      "quality_scores": {{
-        "hook_strength": 9,
-        "standalone_clarity": 10,
-        "payoff_completion": 9,
-        "curiosity": 8,
-        "emotional_intellectual_impact": 8,
-        "retention_potential": 8,
-        "context_independence": 8,
-        "punchline_memorable_moment": 9
-      }},
       "reason": "Clear standalone hook with setup and payoff."
     }}
   ]
@@ -404,7 +395,8 @@ Respond ONLY with valid JSON in this exact structure:
         content = re.sub(r"^```json\s*", "", content)
         content = re.sub(r"\s*```$", "", content)
         data = json.loads(content)
-        return data.get("clips") or data.get("candidates", [])
+        clips = data.get("clips") or data.get("candidates", [])
+        return clips[:3] if isinstance(clips, list) else []
     except Exception as e:
         log.warning("LLM detection call failed: %s", e)
         return None
@@ -616,6 +608,17 @@ def _validate_and_filter_clips(
             )
             continue
 
+        # Standalone score baseline for deterministic Python quality scoring
+        try:
+            cand_standalone = float(item.get("standalone_score", 5.0))
+        except (ValueError, TypeError):
+            cand_standalone = 5.0
+        cand_standalone = max(0.0, min(10.0, cand_standalone))
+
+        missing_setup = bool(item.get("missing_setup", False))
+        missing_payoff = bool(item.get("missing_payoff", False))
+        crit_ref = bool(item.get("critical_unresolved_reference", False))
+
         # Context dependency vs independence mapping
         if "context_dependency" in raw_scores:
             try:
@@ -628,17 +631,22 @@ def _validate_and_filter_clips(
             except (ValueError, TypeError):
                 c_dep = 5.0
         else:
-            c_dep = 5.0
+            if missing_setup or crit_ref:
+                c_dep = 8.0
+            else:
+                c_dep = max(1.0, 10.0 - cand_standalone)
+
+        default_payoff = 2.0 if missing_payoff else cand_standalone
 
         scores_cleaned = {
-            "hook_strength": max(0.0, min(10.0, float(raw_scores.get("hook_strength", 5.0)))),
-            "standalone_clarity": max(0.0, min(10.0, float(raw_scores.get("standalone_clarity", 5.0)))),
-            "payoff": max(0.0, min(10.0, float(raw_scores.get("payoff_completion", raw_scores.get("payoff", 5.0))))),
-            "curiosity": max(0.0, min(10.0, float(raw_scores.get("curiosity", 5.0)))),
-            "impact": max(0.0, min(10.0, float(raw_scores.get("emotional_intellectual_impact", raw_scores.get("impact", 5.0))))),
-            "retention": max(0.0, min(10.0, float(raw_scores.get("retention_potential", raw_scores.get("retention", 5.0))))),
+            "hook_strength": max(0.0, min(10.0, float(raw_scores.get("hook_strength", cand_standalone)))),
+            "standalone_clarity": max(0.0, min(10.0, float(raw_scores.get("standalone_clarity", cand_standalone)))),
+            "payoff": max(0.0, min(10.0, float(raw_scores.get("payoff_completion", raw_scores.get("payoff", default_payoff))))),
+            "curiosity": max(0.0, min(10.0, float(raw_scores.get("curiosity", min(9.0, cand_standalone))))),
+            "impact": max(0.0, min(10.0, float(raw_scores.get("emotional_intellectual_impact", raw_scores.get("impact", min(9.0, cand_standalone)))))),
+            "retention": max(0.0, min(10.0, float(raw_scores.get("retention_potential", raw_scores.get("retention", min(9.0, cand_standalone)))))),
             "context_dependency": max(0.0, min(10.0, c_dep)),
-            "punchline_score": max(0.0, min(10.0, float(raw_scores.get("punchline_memorable_moment", raw_scores.get("punchline_score", raw_scores.get("punchline", 5.0)))))),
+            "punchline_score": max(0.0, min(10.0, float(raw_scores.get("punchline_memorable_moment", raw_scores.get("punchline_score", raw_scores.get("punchline", 8.0 if punchline else 5.0)))))),
         }
 
         # 2. Authoritative Python calculation for quality_score (LLM score is untrusted)

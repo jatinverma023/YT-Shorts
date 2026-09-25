@@ -167,6 +167,23 @@ class TokenAwareRateLimiter:
         self._history.append((now, estimated_tokens))
         self._last_request_time = now
 
+    def refund(self, tokens: int):
+        """Rolls back / refunds previously acquired tokens on failed requests."""
+        if tokens <= 0 or not self._history:
+            return
+
+        remaining_to_refund = tokens
+        new_history = []
+        for timestamp, count in reversed(self._history):
+            if remaining_to_refund <= 0:
+                new_history.append((timestamp, count))
+            elif count <= remaining_to_refund:
+                remaining_to_refund -= count
+            else:
+                new_history.append((timestamp, count - remaining_to_refund))
+                remaining_to_refund = 0
+        self._history = list(reversed(new_history))
+
     def record_actual_completion(self, additional_tokens: int = 0):
         """Optional update when actual completion tokens are known."""
         if additional_tokens > 0 and self._history:
@@ -216,4 +233,8 @@ def call_with_rate_limit(
                 if limiter.sleep_fn is not time.sleep or os.environ.get("RATE_LIMITER_NO_SLEEP") != "1":
                     limiter.sleep_fn(backoff)
                 continue
+
+            # Refund reserved tokens on non-429 client errors (e.g. HTTP 400 json_validate_failed)
+            if not is_429 and hasattr(limiter, "refund"):
+                limiter.refund(estimated)
             raise

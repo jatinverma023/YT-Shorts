@@ -245,6 +245,8 @@ class PipelineRunReport:
                 self.overall_status = "PARTIAL FAILURE ⚠️"
             elif uploaded == 0 and failed > 0:
                 self.overall_status = "FAILED 🔴"
+            elif uploaded == 0 and failed == 0 and self.summary_pending > 0:
+                self.overall_status = "DEGRADED ⚠️"
             else:
                 self.overall_status = "PARTIAL FAILURE ⚠️"
         elif self.errors:

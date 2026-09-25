@@ -7,6 +7,7 @@ import datetime
 import json
 import logging
 import time
+from typing import Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -31,6 +32,45 @@ QUEUE_HEADERS = [
     "punchline",
     "quality_score",
 ]
+
+
+def parse_sheet_float(val, default: Optional[float] = None) -> float:
+    """
+    Safely converts Google Sheets cell value to float.
+    Handles numeric strings with commas (e.g. '7,674.1'), spaces, empty strings,
+    or native numbers.
+    """
+    if val is None or val == "":
+        if default is not None:
+            return default
+        raise ValueError("Empty value cannot be converted to float")
+    if isinstance(val, (int, float)):
+        return float(val)
+    cleaned = str(val).strip().replace(",", "")
+    if not cleaned:
+        if default is not None:
+            return default
+        raise ValueError("Empty string cannot be converted to float")
+    return float(cleaned)
+
+
+def parse_sheet_int(val, default: int = 1) -> int:
+    """
+    Safely converts Google Sheets cell value to int.
+    Handles numeric strings with commas (e.g. '1,000'), spaces, empty strings,
+    or native numbers.
+    """
+    if val is None or val == "":
+        return default
+    if isinstance(val, int):
+        return val
+    cleaned = str(val).strip().replace(",", "")
+    if not cleaned:
+        return default
+    try:
+        return int(float(cleaned))
+    except (ValueError, TypeError):
+        return default
 
 
 def get_sheets_service():
@@ -244,15 +284,15 @@ def get_next_pending_clip(service=None, target_drive_file_id: str = None):
                     clip_data = {
                         "source_video_name": padded[0],
                         "drive_file_id": padded[1],
-                        "clip_index": int(padded[2]) if padded[2] else 1,
-                        "start_time": float(padded[3]),
-                        "end_time": float(padded[4]),
+                        "clip_index": parse_sheet_int(padded[2], default=1),
+                        "start_time": parse_sheet_float(padded[3]),
+                        "end_time": parse_sheet_float(padded[4]),
                         "hook_summary": padded[5],
                         "status": "pending",
                         "youtube_url": padded[7],
                         "error": padded[8],
                         "punchline": padded[11].strip() if len(padded) > 11 else "",
-                        "quality_score": float(padded[12]) if len(padded) > 12 and padded[12] else 0.0,
+                        "quality_score": parse_sheet_float(padded[12], default=0.0) if len(padded) > 12 and padded[12] else 0.0,
                     }
                     pending_candidates.append((idx, clip_data))
                 except (ValueError, IndexError) as err:
@@ -268,9 +308,9 @@ def get_next_pending_clip(service=None, target_drive_file_id: str = None):
     # 3. clip_index ASC
     pending_candidates.sort(
         key=lambda item: (
-            -float(item[1].get("quality_score", 0.0)),
+            -parse_sheet_float(item[1].get("quality_score", 0.0), default=0.0),
             item[0],
-            int(item[1].get("clip_index", 1)),
+            parse_sheet_int(item[1].get("clip_index", 1), default=1),
         )
     )
     return pending_candidates[0]
@@ -305,22 +345,22 @@ def get_pending_clips_for_video(drive_file_id: str, service=None) -> list:
                     clip_data = {
                         "source_video_name": padded[0],
                         "drive_file_id": padded[1],
-                        "clip_index": int(padded[2]) if padded[2] else 1,
-                        "start_time": float(padded[3]),
-                        "end_time": float(padded[4]),
+                        "clip_index": parse_sheet_int(padded[2], default=1),
+                        "start_time": parse_sheet_float(padded[3]),
+                        "end_time": parse_sheet_float(padded[4]),
                         "hook_summary": padded[5],
                         "status": "pending",
                         "youtube_url": padded[7],
                         "error": padded[8],
                         "punchline": padded[11].strip() if len(padded) > 11 else "",
-                        "quality_score": float(padded[12]) if len(padded) > 12 and padded[12] else 0.0,
+                        "quality_score": parse_sheet_float(padded[12], default=0.0) if len(padded) > 12 and padded[12] else 0.0,
                     }
                     pending.append((idx, clip_data))
                 except (ValueError, IndexError) as err:
                     log.warning("Skipping malformed queue row %d for video %s: %s", idx, drive_file_id, err)
                     continue
 
-    pending.sort(key=lambda x: x[1]["clip_index"])
+    pending.sort(key=lambda x: parse_sheet_int(x[1].get("clip_index", 1), default=1))
     return pending
 
 
@@ -518,9 +558,9 @@ def get_clip_by_status(target_status: str, service=None):
                 return idx, {
                     "source_video_name": padded[0],
                     "drive_file_id": padded[1],
-                    "clip_index": int(padded[2]) if padded[2] else 1,
-                    "start_time": float(padded[3]),
-                    "end_time": float(padded[4]),
+                    "clip_index": parse_sheet_int(padded[2], default=1),
+                    "start_time": parse_sheet_float(padded[3]),
+                    "end_time": parse_sheet_float(padded[4]),
                     "hook_summary": padded[5],
                     "status": status,
                     "youtube_url": padded[7],
