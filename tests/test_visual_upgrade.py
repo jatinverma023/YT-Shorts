@@ -37,7 +37,7 @@ class TestVisualUpgrade1A(unittest.TestCase):
         self.assertIn("[bg]", filt)
         self.assertIn("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920", filt)
         self.assertIn("boxblur=25:5", filt)
-        # Background brightness is conservative (-0.08) so background is visibly recognizable, not black
+        # Background brightness is moderate dimming (-0.02) so background is visibly recognizable, not black
         self.assertIn(f"brightness={config.BG_BRIGHTNESS:.2f}", filt)
         self.assertIn(f"saturation={config.BG_SATURATION:.2f}", filt)
 

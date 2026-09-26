@@ -69,8 +69,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 
 # --- Video / caption styling ---
-TARGET_WIDTH = 1080
-TARGET_HEIGHT = 1920
+TARGET_WIDTH = int(os.environ.get("TARGET_WIDTH", "1080"))
+TARGET_HEIGHT = int(os.environ.get("TARGET_HEIGHT", "1920"))
 MAX_SHORT_SECONDS = int(os.environ.get("MAX_SHORT_SECONDS", "59"))
 SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", "Arial")
 SUBTITLE_FONT_SIZE = int(os.environ.get("SUBTITLE_FONT_SIZE", "52"))  # ASS 1080x1920 PlayRes scale
@@ -103,8 +103,8 @@ VISUAL_VIGNETTE_ENABLED = os.environ.get("VISUAL_VIGNETTE_ENABLED", "true").lowe
 VISUAL_VIGNETTE_STRENGTH = float(os.environ.get("VISUAL_VIGNETTE_STRENGTH", "0.25"))
 VISUAL_MOTION_ENABLED = os.environ.get("VISUAL_MOTION_ENABLED", "true").lower() == "true"
 VISUAL_MOTION_MAX_ZOOM = float(os.environ.get("VISUAL_MOTION_MAX_ZOOM", "1.04"))
-BG_BRIGHTNESS = float(os.environ.get("BG_BRIGHTNESS", "-0.08"))
-BG_SATURATION = float(os.environ.get("BG_SATURATION", "1.05"))
+BG_BRIGHTNESS = float(os.environ.get("BG_BRIGHTNESS", "-0.02"))
+BG_SATURATION = float(os.environ.get("BG_SATURATION", "1.08"))
 FOREGROUND_SCALE = float(os.environ.get("FOREGROUND_SCALE", "1.18"))
 TARGET_FPS = int(os.environ.get("TARGET_FPS", "0"))
 ENABLE_ZOOM = VISUAL_MOTION_ENABLED

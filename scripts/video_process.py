@@ -85,6 +85,8 @@ def extract_clip_segment(source_path: str, start_time: float, end_time: float, o
         "-i", source_path,
         "-ss", f"{start_time:.3f}",
         "-t", f"{duration:.3f}",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-c:a", "aac", "-b:a", "128k",
         "-avoid_negative_ts", "make_zero",
@@ -187,8 +189,8 @@ def trim_silences_from_words(input_path: str, words: list, output_path: str, max
     filter_parts = []
     concat_inputs = []
     for idx, (s, e) in enumerate(keep_intervals):
-        filter_parts.append(f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{idx}];")
-        filter_parts.append(f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{idx}];")
+        filter_parts.append(f"[0:v:0]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{idx}];")
+        filter_parts.append(f"[0:a:0]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{idx}];")
         concat_inputs.append(f"[v{idx}][a{idx}]")
 
     n_segs = len(keep_intervals)
@@ -455,7 +457,7 @@ def build_ffmpeg_filter(
         # Video is already vertical (e.g. 9:16)
         scale_crop = (
             f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT}"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},setsar=1"
         )
         fg_filters = [scale_crop]
         if motion_filter:
@@ -470,7 +472,7 @@ def build_ffmpeg_filter(
         # Background: 1080x1920 blurred + dimmed + saturated
         bg_chain = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},boxblur=25:5,"
+            f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},setsar=1,boxblur=25:5,"
             f"eq=brightness={BG_BRIGHTNESS:.2f}:saturation={BG_SATURATION:.2f}[bg]"
         )
 
@@ -481,11 +483,13 @@ def build_ffmpeg_filter(
                 f"scale={fg_w}:-2:force_original_aspect_ratio=decrease",
                 "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 f"crop=min(iw\\,{TARGET_WIDTH}):ih",
+                "setsar=1",
             ]
         else:
             fg_scale_filters = [
                 f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease",
                 "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "setsar=1",
             ]
 
         fg_filters = list(fg_scale_filters)
@@ -501,17 +505,17 @@ def build_ffmpeg_filter(
         post_overlay.append(sub_filter)
         post_str = f",{','.join(post_overlay)}" if post_overlay else ""
 
-        merge_chain = f"[bg][fg]overlay=(W-w)/2:(H-h)/2{post_str}[vout]"
+        merge_chain = f"[bg][fg]overlay=(W-w)/2:(H-h)/2{post_str},setsar=1[vout]"
         video_chain = f"{bg_chain};{fg_chain};{merge_chain}"
 
     # Audio stream handling
     if has_audio and ENABLE_LOUDNORM:
-        audio_chain = f";[0:a]loudnorm=I={LOUDNORM_TARGET_I}:LRA=11:TP=-1.5[aout]"
+        audio_chain = f";[0:a:0]loudnorm=I={LOUDNORM_TARGET_I}:LRA=11:TP=-1.5[aout]"
         filter_complex = video_chain + audio_chain
         maps = ["-map", "[vout]", "-map", "[aout]"]
     elif has_audio:
         filter_complex = video_chain
-        maps = ["-map", "[vout]", "-map", "0:a"]
+        maps = ["-map", "[vout]", "-map", "0:a:0"]
     else:
         filter_complex = video_chain
         maps = ["-map", "[vout]"]
