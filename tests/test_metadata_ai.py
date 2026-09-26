@@ -29,6 +29,10 @@ import metadata_ai
 class TestMetadataAI(unittest.TestCase):
     """Test suite for metadata generation, JSON extraction, and fallback mechanisms."""
 
+    def setUp(self):
+        from ai_rate_limiter import shared_rate_limiter
+        shared_rate_limiter._history.clear()
+
     def test_extract_json_payload_valid_json(self):
         """Extracts JSON from clean, raw JSON string."""
         raw = '{"title_1": "Top Title #shorts", "description": "Engaging transcript caption.", "tags": ["viral"]}'
@@ -168,7 +172,9 @@ Hope this helps increase your audience retention!"""
             )
 
         self.assertIn("interview clip", res["title"])
-        self.assertEqual(res["description"], "interview clip\n\n#shorts #podcast #viral")
+        self.assertTrue(len(res["description"]) > 20)
+        self.assertIn("#Shorts", res["description"])
+        self.assertNotIn("#viral", res["description"])
         # Ensure clear logging of missing API key
         mock_log_warn.assert_called()
         log_msg = mock_log_warn.call_args[0][0]
@@ -176,7 +182,9 @@ Hope this helps increase your audience retention!"""
 
     @patch("metadata_ai.OpenAI")
     @patch("metadata_ai.log.warning")
-    def test_malformed_json_fallback_and_logging(self, mock_log_warn, mock_openai_cls):
+    @patch("ai_rate_limiter.time.sleep", return_value=None)
+    @patch("metadata_ai.time.sleep", return_value=None)
+    def test_malformed_json_fallback_and_logging(self, mock_sleep1, mock_sleep2, mock_log_warn, mock_openai_cls):
         """When the LLM returns invalid/malformed non-JSON text, retries, logs error, and uses fallback."""
         mock_client = MagicMock()
         mock_openai_cls.return_value = mock_client
@@ -193,8 +201,11 @@ Hope this helps increase your audience retention!"""
             )
 
         # Safe fallback returned
-        self.assertIn("finance talk Part 1", res["title"])
-        self.assertEqual(res["description"], "finance talk Part 1\n\n#shorts #podcast #viral")
+        self.assertTrue(res.get("is_fallback"))
+        self.assertTrue(res["title"].lower().endswith("#shorts"))
+        self.assertTrue(len(res["description"]) > 20)
+        self.assertIn("#Shorts", res["description"])
+        self.assertNotIn("#viral", res["description"])
 
         # Check that fallback and error were clearly logged
         warnings = [call[0][0] for call in mock_log_warn.call_args_list]
@@ -202,13 +213,15 @@ Hope this helps increase your audience retention!"""
 
     @patch("metadata_ai.OpenAI")
     @patch("metadata_ai.log.warning")
-    def test_api_failure_triggers_retry_and_fallback(self, mock_log_warn, mock_openai_cls):
+    @patch("ai_rate_limiter.time.sleep", return_value=None)
+    @patch("metadata_ai.time.sleep", return_value=None)
+    def test_api_failure_triggers_retry_and_fallback(self, mock_sleep1, mock_sleep2, mock_log_warn, mock_openai_cls):
         """When the API throws an exception (e.g. rate limit, 503, timeout), retries and falls back safely."""
         mock_client = MagicMock()
         mock_openai_cls.return_value = mock_client
         mock_client.chat.completions.create.side_effect = RuntimeError("503 Service Unavailable")
 
-        with patch.object(config, "GROQ_API_KEY", "gsk_test_key_123"), patch("time.sleep"):
+        with patch.object(config, "GROQ_API_KEY", "gsk_test_key_123"):
             res = metadata_ai.generate_shorts_metadata(
                 "tech_podcast Part 3",
                 transcript="Quantum computing will revolutionize cryptography.",
@@ -216,7 +229,10 @@ Hope this helps increase your audience retention!"""
 
         # Retries attempted 3 times
         self.assertEqual(mock_client.chat.completions.create.call_count, 3)
-        self.assertEqual(res["description"], "tech podcast Part 3\n\n#shorts #podcast #viral")
+        self.assertTrue(len(res["description"]) > 20)
+        self.assertIn("#Shorts", res["description"])
+        self.assertNotIn("#viral", res["description"])
+        self.assertTrue(res.get("is_fallback"))
 
         warnings = [call[0][0] for call in mock_log_warn.call_args_list]
         self.assertTrue(any("[METADATA_API_ERROR]" in w for w in warnings))

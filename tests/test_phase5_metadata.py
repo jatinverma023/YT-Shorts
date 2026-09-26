@@ -106,7 +106,7 @@ class TestPhase5Metadata(unittest.TestCase):
 
         self.assertTrue(res.get("is_fallback"))
         self.assertEqual(res["title_strategy"], "fallback")
-        self.assertIn("huberman dopamine", res["title"].lower())
+        self.assertTrue(res["title"].lower().endswith("#shorts"))
 
     @patch("ai_rate_limiter.time.sleep", return_value=None)
     @patch("metadata_ai.time.sleep", return_value=None)

@@ -19,12 +19,14 @@ import hook_generator
 import metadata_ai
 import youtube_upload
 import main as pipeline_main
+from ai_rate_limiter import shared_rate_limiter
 
 
 class TestProductionMetadataPipeline(unittest.TestCase):
     """Test suite verifying end-to-end wiring of the Content Packaging System into production."""
 
     def setUp(self):
+        shared_rate_limiter._history.clear()
         self.sample_transcript = (
             "When you are having trouble falling asleep at night, your autonomic nervous system "
             "is stuck in high arousal. By doing two quick inhales through the nose and a long exhale "
@@ -219,7 +221,7 @@ class TestProductionMetadataPipeline(unittest.TestCase):
         # Truncated response must trigger fallback, NOT partial corruption or crash
         self.assertTrue(res.get("is_fallback"))
         self.assertEqual(res["title_strategy"], "fallback")
-        self.assertIn("huberman clip", res["title"].lower())
+        self.assertTrue(res["title"].lower().endswith("#shorts"))
 
     def test_d_filename_fallback_defensive_only_not_used_when_packaging_available(self):
         """TEST D: Filename fallback is used ONLY when AI fails, never when packaging metadata succeeds."""

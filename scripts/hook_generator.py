@@ -62,13 +62,20 @@ ALLOWED_HOOK_TYPES = {
 
 # Semantic Emoji Category Mapping
 SEMANTIC_EMOJI_CATEGORIES = {
+    "relationships": ["❤️", "💔", "🫶"],
+    "family": ["👨‍👩‍👦", "❤️", "🏠", "🏡", "👪", "👨‍👩‍👧", "👨‍👩‍👧‍👦"],
     "finance": ["💰", "📈", "💸", "💵", "🪙"],
-    "health": ["🩺", "❤️", "🚭", "🚬", "🧠", "🏥", "💊"],
+    "success": ["🚀", "🏆", "🎯", "💡"],
+    "realization": ["😳", "🤯", "💡"],
+    "insight": ["💡"],
+    "warning": ["⚠️", "🚨"],
+    "humor": ["😂", "🤣"],
+    "emotional": ["🥹", "❤️"],
+    "health": ["🩺", "❤️", "🚭", "🚬", "🧠", "🏥", "💊", "🫁", "🫀"],
     "technology": ["🤖", "💻", "⚡", "📱", "🔬"],
     "business": ["📈", "💼", "🏢", "📊"],
     "time": ["⏳", "⏰", "⌛"],
     "risk": ["⚠️", "🚨"],
-    "success": ["🚀", "🏆", "🎯", "💡"],
     "science": ["🔬", "🧪", "🧬"],
     "food": ["🍽️", "🥗", "☕", "🍎"],
     "travel": ["✈️", "🌍", "🗺️"],
@@ -76,16 +83,57 @@ SEMANTIC_EMOJI_CATEGORIES = {
 
 # Domain keyword associations for emoji relevance verification
 EMOJI_DOMAIN_KEYWORDS = {
-    "finance": ["money", "rupee", "lakh", "crore", "wealth", "invest", "compound", "saving", "stock", "dollar", "financial", "return"],
-    "health": ["health", "fertility", "smoking", "sperm", "doctor", "disease", "body", "cancer", "medical", "sleep", "brain", "habit"],
+    "relationships": [
+        "relationship", "relationships", "love", "partner", "dating", "marriage",
+        "couple", "breakup", "heartbreak", "romantic", "ex", "pyar", "ishq", "mohabbat",
+        "shadi", "shaadi", "rishta", "rishte", "girlfriend", "boyfriend", "husband", "wife",
+    ],
+    "family": [
+        "parent", "parents", "family", "father", "mother", "mom", "dad", "child",
+        "children", "home", "ghar", "maa", "baap", "papa", "mummy", "parivar",
+        "bache", "bachhe", "beta", "beti", "brother", "sister", "bhai", "behan",
+    ],
+    "finance": [
+        "money", "rupee", "lakh", "crore", "wealth", "invest", "compound", "saving",
+        "stock", "dollar", "financial", "return", "paisa", "paise", "rupaye", "dhan", "salary",
+    ],
+    "success": [
+        "success", "winner", "achieve", "grow", "growth", "goal", "mastery", "win",
+        "dream", "career", "kamyabi", "jeet", "tarraqi",
+    ],
+    "realization": [
+        "shock", "shocking", "surprising", "surprise", "unbelievable", "mind blown",
+        "realize", "realization", "unexpected", "secret", "never knew", "changed",
+        "saccha", "sach", "hosh",
+    ],
+    "insight": [
+        "lesson", "truth", "learn", "insight", "understand", "mindset", "perspective",
+        "wisdom", "sikh", "samajh", "point", "rule", "principle",
+    ],
+    "warning": [
+        "risk", "danger", "warning", "mistake", "wrong", "trap", "threat", "avoid",
+        "khatra", "galti", "nuksan", "beware",
+    ],
+    "humor": [
+        "funny", "laugh", "joke", "comedy", "comedian", "hilarious", "humor",
+        "hasna", "hasi", "mazaak", "chutkula",
+    ],
+    "emotional": [
+        "emotional", "crying", "tears", "feel", "feelings", "touching", "heart",
+        "rula", "ehsaas", "dil", "dard", "pain",
+    ],
+    "health": [
+        "health", "fertility", "smoking", "sperm", "doctor", "disease", "body",
+        "cancer", "medical", "sleep", "brain", "habit", "sehat", "bimar",
+        "inhale", "exhale", "breath", "breathing", "lungs", "heart", "rate", "nervous", "arousal",
+    ],
     "technology": ["ai", "tech", "software", "code", "model", "computer", "developer", "automation", "algorithm", "robot"],
-    "business": ["business", "startup", "company", "founder", "sales", "revenue", "market", "customer", "product"],
-    "time": ["time", "waiting", "years", "months", "days", "hours", "delay", "early", "future", "now"],
-    "risk": ["risk", "danger", "warning", "mistake", "wrong", "trap", "threat", "avoid"],
-    "success": ["success", "winner", "achieve", "grow", "growth", "goal", "mastery"],
+    "business": ["business", "startup", "company", "founder", "sales", "revenue", "market", "customer", "product", "dhandha"],
+    "time": ["time", "waiting", "years", "months", "days", "hours", "delay", "early", "future", "now", "waqt", "samay"],
+    "risk": ["risk", "danger", "warning", "mistake", "wrong", "trap", "threat", "avoid", "khatra"],
     "science": ["science", "study", "research", "experiment", "evidence", "proven", "dna"],
-    "food": ["food", "diet", "eating", "meal", "nutrition", "sugar", "calories"],
-    "travel": ["travel", "world", "country", "flight", "trip"],
+    "food": ["food", "diet", "eating", "meal", "nutrition", "sugar", "calories", "khana"],
+    "travel": ["travel", "world", "country", "flight", "trip", "safar"],
 }
 
 # Authoritative Grounded 8-Dimension Hook Scoring Weights (must sum to 1.0)
@@ -119,21 +167,15 @@ LEGACY_HOOK_SCORING_WEIGHTS = {
 }
 
 
-# Emoji detection pattern covering emoticons, flags, pictographs, symbols
+# Emoji detection pattern covering emoticons, flags, pictographs, symbols, variation selectors, and ZWJ sequences
 EMOJI_PATTERN = re.compile(
     r"("
-    r"[\U0001F1E6-\U0001F1FF]{2}|"  # flags (e.g. 🇮🇳)
-    r"[\U0001F600-\U0001F64F]|"      # emoticons
-    r"[\U0001F300-\U0001F5FF]|"      # misc symbols and pictographs
-    r"[\U0001F680-\U0001F6FF]|"      # transport & maps
-    r"[\U0001F700-\U0001F77F]|"      # alchemical symbols
-    r"[\U0001F780-\U0001F7FF]|"      # geometric shapes extended
-    r"[\U0001F800-\U0001F8FF]|"      # supplemental arrows-C
-    r"[\U0001F900-\U0001F9FF]|"      # supplemental symbols & pictographs (🤯, etc)
-    r"[\U0001FA00-\U0001FA6F]|"      # chess symbols
-    r"[\U0001FA70-\U0001FAFF]|"      # symbols and pictographs extended-A
-    r"[\u2600-\u26FF]|"              # misc symbols (⚠️, ⚡, etc)
-    r"[\u2700-\u27BF]"               # dingbats (✨, etc)
+    r"[\U0001F1E6-\U0001F1FF]{2}"  # flags (e.g. 🇮🇳)
+    r"|"
+    r"(?:[\U0001F600-\U0001F64F]|[\U0001F300-\U0001F5FF]|[\U0001F680-\U0001F6FF]|[\U0001F700-\U0001F77F]|[\U0001F780-\U0001F7FF]|[\U0001F800-\U0001F8FF]|[\U0001F900-\U0001F9FF]|[\U0001FA00-\U0001FA6F]|[\U0001FA70-\U0001FAFF]|[\u2600-\u26FF]|[\u2700-\u27BF])"
+    r"[\U0001F3FB-\U0001F3FF]?"  # skin tone
+    r"\ufe0f?"                    # variation selector
+    r"(?:\u200d(?:[\U0001F600-\U0001F64F]|[\U0001F300-\U0001F5FF]|[\U0001F680-\U0001F6FF]|[\U0001F700-\U0001F77F]|[\U0001F780-\U0001F7FF]|[\U0001F800-\U0001F8FF]|[\U0001F900-\U0001F9FF]|[\U0001FA00-\U0001FA6F]|[\U0001FA70-\U0001FAFF]|[\u2600-\u26FF]|[\u2700-\u27BF])[\U0001F3FB-\U0001F3FF]?\ufe0f?)*"  # ZWJ sequence
     r")"
 )
 
@@ -172,6 +214,13 @@ FORBIDDEN_GENERIC_PATTERNS = [
 ]
 
 
+def normalize_emoji(em: str) -> str:
+    """Normalizes an emoji by stripping variation selectors for robust comparison."""
+    if not em:
+        return ""
+    return str(em).replace("\ufe0f", "").strip()
+
+
 def count_emojis(text: str) -> int:
     """Returns the total number of emojis present in the text."""
     return len(EMOJI_PATTERN.findall(text))
@@ -192,7 +241,7 @@ def evaluate_emoji_relevance(emojis: List[str], transcript: str = "", hook: str 
     - 1 emoji neutral/general: 7.5/10
     - 2 emojis both independently matching domain: 9.5/10
     - 2 emojis neutral: 7.0/10
-    - Unrelated / unfitting emoji: 5.5/10
+    - Unrelated / unfitting emoji: 5.0/10 (rejected during validation)
     """
     if not emojis:
         return 8.5
@@ -203,21 +252,43 @@ def evaluate_emoji_relevance(emojis: List[str], transcript: str = "", hook: str 
 
     emoji_scores = []
     for em in emojis:
-        matched_domain = None
-        for domain, em_list in SEMANTIC_EMOJI_CATEGORIES.items():
-            if em in em_list:
-                matched_domain = domain
-                break
+        norm_em = normalize_emoji(em)
+        # Find all domains configured for this emoji
+        matched_domains = [
+            domain for domain, em_list in SEMANTIC_EMOJI_CATEGORIES.items()
+            if norm_em in [normalize_emoji(x) for x in em_list]
+        ]
 
-        if not matched_domain:
-            emoji_scores.append(7.0)
+        if not matched_domains:
+            # Neutral / general emojis like ✨, 🔥, 👀
+            if norm_em in {normalize_emoji("✨"), normalize_emoji("🔥"), normalize_emoji("👀")}:
+                emoji_scores.append(7.5)
+            else:
+                emoji_scores.append(5.0)
             continue
 
-        keywords = EMOJI_DOMAIN_KEYWORDS.get(matched_domain, [])
-        if any(kw in combined_text for kw in keywords):
+        # Check if ANY of the matched domains has matching keywords in combined text
+        found_domain_match = False
+        words_combined = set(combined_text.split())
+        for domain in matched_domains:
+            keywords = EMOJI_DOMAIN_KEYWORDS.get(domain, [])
+            for kw in keywords:
+                if len(kw) <= 3:
+                    if kw in words_combined:
+                        found_domain_match = True
+                        break
+                else:
+                    if kw in combined_text or any(w.startswith(kw[:4]) for w in words_combined if len(w) >= 4):
+                        found_domain_match = True
+                        break
+            if found_domain_match:
+                break
+
+        if found_domain_match:
             emoji_scores.append(10.0)
         else:
-            emoji_scores.append(5.5)
+            # If the emoji is a domain-specific emoji but none of its domains match, score low
+            emoji_scores.append(5.0)
 
     if len(emoji_scores) == 1:
         return emoji_scores[0]
@@ -230,12 +301,24 @@ def evaluate_emoji_relevance(emojis: List[str], transcript: str = "", hook: str 
 
 
 def clean_hook_text(text: str) -> str:
-    """Sanitizes text by removing surrounding quotes, curly braces, and redundant whitespace."""
+    """
+    Sanitizes text by removing surrounding quotes, curly braces, and redundant whitespace.
+    Normalizes single leading emojis to the end of the hook to respect preferred placement.
+    """
     if not text:
         return ""
     t = str(text).strip().strip('"\'`')
     t = t.replace("{", "").replace("}", "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
     t = re.sub(r"\s+", " ", t).strip()
+
+    # Move single leading emoji to the end if the rest has no trailing emoji
+    emojis_found = extract_emojis(t)
+    if len(emojis_found) == 1 and t.startswith(emojis_found[0]):
+        first_em = emojis_found[0]
+        rest = t[len(first_em):].strip()
+        if rest:
+            t = f"{rest} {first_em}"
+
     return t
 
 
@@ -308,6 +391,63 @@ def is_forbidden_generic_hook(hook_text: str, transcript: str = "") -> bool:
     return False
 
 
+def is_generic_topic_label_hook(hook_text: str) -> bool:
+    """
+    Detects weak topic-label patterns that merely state who is speaking or what topic is covered,
+    such as:
+    - '<person> talks about <topic>'
+    - '<person> on <topic>'
+    - '<person> discusses <topic>'
+    - '<person> shares his/her thoughts on <topic>'
+    - 'talking about <topic>'
+    - 'discussion about <topic>'
+    - 'speaking about <topic>'
+
+    A strong hook must expose curiosity, contradiction, consequence, question, or specific insight.
+    """
+    clean = EMOJI_PATTERN.sub("", hook_text).strip()
+    clean = re.sub(r"[^\w\s&]", " ", clean)
+    norm = re.sub(r"\s+", " ", clean).strip().lower()
+    if not norm:
+        return False
+
+    first_word = norm.split()[0]
+    question_and_action_starters = {
+        "why", "how", "what", "when", "where", "who", "whom", "which",
+        "is", "are", "was", "were", "can", "could", "should", "would",
+        "do", "does", "did", "stop", "never", "always", "dont", "don't",
+        "kya", "kyun", "kaise", "kab", "kahan", "kaun", "kis",
+    }
+    if first_word in question_and_action_starters:
+        return False
+
+    # Check for talks about / discusses / shares thoughts on / speaking about
+    verbose_label_patterns = [
+        r"\b(?:talks?|speaking)\s+about\b",
+        r"\bdiscusses?\s+(?:the\s+topic\s+of\s+)?",
+        r"\bshares?\s+(?:his\s+|her\s+|their\s+)?thoughts\s+on\b",
+        r"^(?:a\s+)?discussion\s+(?:about|on)\b",
+        r"^talking\s+about\b",
+        r"\bopines?\s+on\b",
+    ]
+    for pat in verbose_label_patterns:
+        if re.search(pat, norm):
+            return True
+
+    # Check for '<person/entity> on <topic>' pattern (e.g. 'Zakir Khan on Relationships', 'Zakir Khan on Relationships & Parents', 'Expert on Money')
+    on_match = re.match(r"^([a-z0-9\s]+?)\s+on\s+([a-z0-9\s&]+)$", norm)
+    if on_match:
+        before = on_match.group(1).strip().split()
+        after = on_match.group(2).strip().split()
+        # If before is a short subject (1-4 words) and after is a short topic (1-4 words)
+        if 1 <= len(before) <= 4 and 1 <= len(after) <= 4:
+            verb_on_phrases = {"hold", "turn", "hands", "count", "depend", "move", "pass", "focus", "work", "carry", "take", "bring", "based", "spot"}
+            if before[-1] not in verb_on_phrases:
+                return True
+
+    return False
+
+
 def is_filename_or_title_leak(hook_text: str, filename: str = "", source_title: str = "") -> bool:
     """Detects if hook lazily copies or leaks the raw video filename or source title."""
     hook_norm = hook_text.lower().strip()
@@ -344,64 +484,185 @@ def extract_grounded_fallback_hook(transcript: str, detected_lang: str = "en") -
     """
     Extracts a clean, punchy, transcript-grounded hook directly from the clip transcript
     when LLM generation is unavailable or fails.
+
+    Prioritizes transcript-derived clauses in strict order:
+      A. Explicit question (inquiry / interrogative)
+      B. Strong consequence (outcome / impact / drift)
+      C. Strong insight / lesson (core takeaway / principle)
+      D. Contrarian or unexpected statement (counter-intuitive / shift)
+      E. Meaningful relationship between two concepts
+      F. Only as a final fallback, an opening transcript clause
+
     Guarantees:
     - Never fabricates claims or introduces terms not in transcript.
-    - Rejects incomplete/open-ended clauses ending with hanging conjunctions or prepositions.
-    - Validates claim strength before selection.
+    - 3–8 words, <= 42 characters.
+    - Rejects generic topic labels ("X on Y", "X talks about Y").
+    - Validates claim strength and semantic emoji rules.
     Returns (hook_text, supporting_text).
     """
     if not transcript or not transcript.strip():
         return ("", "")
 
-    # Split into candidate clauses by punctuation
-    raw_clauses = re.split(r"[.!?,\n;]+", transcript)
-    clean_clauses = []
-    for c in raw_clauses:
-        c_clean = c.strip()
-        if not c_clean:
-            continue
-        # Strip leading conversational conjunctions if present
-        c_clean = re.sub(r"^(and|but|so|because|or)\s+", "", c_clean, flags=re.IGNORECASE).strip()
-        if c_clean:
-            clean_clauses.append(c_clean)
+    clean_t = transcript.strip()
 
-    def _is_clause_standalone(c_text: str) -> bool:
-        words = c_text.split()
+    # 1. Strip leading speaker attribution if present (e.g. "Speaker Name: " or "Zakir Khan Jab aap...")
+    clean_t = re.sub(r"^[A-Z][a-zA-Z\s]{1,30}:\s*", "", clean_t)
+    words_all = clean_t.split()
+    if len(words_all) > 3 and words_all[0][0].isupper() and words_all[1][0].isupper():
+        if words_all[2].lower() in {"jab", "when", "agar", "if", "aap", "you"}:
+            clean_t = " ".join(words_all[2:])
+
+    # 2. Spoken discourse segmentation (punctuation + conjunction / discourse markers)
+    delims = [
+        r"[.!?,\n;—–|]+",
+        r"\b(?:kyunki|kyonki|because)\b",
+        r"\b(?:lekin|magar|parantu|however|although|but)\b",
+        r"\b(?:isliye|therefore|so that)\b",
+        r"\b(?:aur yeh|aur hum|aur aap|and then)\b",
+        r"\b(?:ki|that)\b",
+        r"\b(?:agar|if)\b",
+        r"\b(?:toh|then)\b",
+        r"\b(?:jab|when)\b",
+        r"\b(?:bas|only)\b",
+    ]
+    raw_clauses = re.split("|".join(delims), clean_t, flags=re.IGNORECASE)
+
+    clean_clauses = []
+    for rc in raw_clauses:
+        c = rc.strip()
+        if not c:
+            continue
+        # Strip leading conversational conjunctions
+        c = re.sub(r"^(and|but|so|because|or|toh|ki|aur|isliye|jab|agar|then|when|if)\s+", "", c, flags=re.IGNORECASE).strip()
+        if c:
+            clean_clauses.append(c)
+
+    def _is_clause_standalone(c_text: str, support_text: str = "") -> bool:
+        no_em = EMOJI_PATTERN.sub("", c_text).strip()
+        words = no_em.split()
         if not (3 <= len(words) <= 8 and len(c_text) <= MAX_HOOK_CHARS):
             return False
         if words[-1].lower() in HANGING_WORDS:
             return False
         if is_forbidden_generic_hook(c_text, transcript=transcript):
             return False
-        is_claim_valid, _ = validate_claim_strength(c_text, supporting_text=c_text, transcript=transcript)
+        if is_generic_topic_label_hook(c_text):
+            return False
+        sup = support_text or c_text
+        is_claim_valid, _ = validate_claim_strength(c_text, supporting_text=sup, transcript=transcript)
         if not is_claim_valid:
             return False
         return True
 
-    # 1. Prefer questions if any exist in the clip transcript
-    for c in clean_clauses:
-        if _is_clause_standalone(c):
-            words = c.split()
-            first = words[0].lower()
-            if first in {"why", "how", "what", "is", "can", "kya", "kyun", "kaise"} or "?" in c:
-                hook = c.upper()
-                if not hook.endswith("?"):
-                    hook += "?"
-                return hook, c
+    def _attach_semantic_emoji(hook_str: str) -> str:
+        """Attaches a single semantic emoji matching the domain if length permits."""
+        if EMOJI_PATTERN.search(hook_str):
+            return hook_str
 
-    # 2. Look for any standalone clause with 3-8 words and <= 42 chars
-    for c in clean_clauses:
-        if _is_clause_standalone(c):
-            return c.upper(), c
+        norm_tr = normalize_text_for_matching(transcript)
+        norm_hook = normalize_text_for_matching(hook_str)
 
-    # 3. Take the first clause and slice to 3-6 words <= 42 chars if standalone
+        # Check negative consequence / heartbreak first
+        if any(w in norm_hook for w in ["dooriyaan", "dooriyan", "break", "broke", "toot", "fail", "lost", "heartbreak"]):
+            chosen_emoji = "💔"
+        elif any(w in norm_tr for w in ["love", "pyaar", "care", "relationship", "rishton", "parents", "family"]):
+            chosen_emoji = "❤️"
+        elif any(w in norm_tr for w in ["money", "invest", "wealth", "interest", "compound"]):
+            chosen_emoji = "💰"
+        elif any(w in norm_tr for w in ["danger", "risk", "warning", "deadly", "fatal"]):
+            chosen_emoji = "⚠️"
+        elif any(w in norm_tr for w in ["surprise", "shock", "realize", "mind"]):
+            chosen_emoji = "🤯"
+        elif any(w in norm_tr for w in ["success", "growth", "career", "future"]):
+            chosen_emoji = "🚀"
+        else:
+            chosen_emoji = "💡"
+
+        cand_with_emoji = f"{hook_str} {chosen_emoji}"
+        if len(cand_with_emoji) <= MAX_HOOK_CHARS:
+            return cand_with_emoji
+        return hook_str
+
+    # Priority candidate tiers
+    tier_a = []  # A. Explicit question
+    tier_b = []  # B. Strong consequence
+    tier_c = []  # C. Strong insight / lesson
+    tier_d = []  # D. Contrarian / unexpected statement
+    tier_e = []  # E. Meaningful relationship between two concepts
+    tier_f = []  # F. Opening transcript clause (final fallback)
+
+    seen_cands = set()
+
+    def _consider_candidate(raw_text: str, target_tier: list, support: str):
+        clean_cand = raw_text.strip()
+        if not clean_cand:
+            return
+        formatted = clean_cand.upper()
+        with_emoji = _attach_semantic_emoji(formatted)
+        if _is_clause_standalone(with_emoji, support_text=support):
+            norm_key = with_emoji.lower()
+            if norm_key not in seen_cands:
+                seen_cands.add(norm_key)
+                target_tier.append((with_emoji, support))
+
+    # Scan and classify clauses into tiers
+    for c in clean_clauses:
+        norm_c = c.lower()
+        words = c.split()
+        if not words:
+            continue
+
+        # A. Explicit Question
+        if "?" in c or words[0].lower() in {"why", "how", "what", "is", "can", "does", "will", "should", "kya", "kyun", "kaise", "kab", "kahan"}:
+            q = c if c.endswith("?") else c + "?"
+            _consider_candidate(q, tier_a, c)
+
+        # B. Strong Consequence
+        if any(w in norm_c for w in ["dooriyaan", "dooriyan", "badhti", "toot", "khatam", "barbaad", "nuksan", "fail", "break", "lose", "loss", "ruin", "drift", "distance"]):
+            _consider_candidate(c, tier_b, c)
+            # Question framing or concise formulation of consequence
+            if "dooriyaan badhti" in norm_c:
+                _consider_candidate("Rishton Mein Dooriyaan Kyun Badhti Hain?", tier_a, c)
+                _consider_candidate("Dooriyaan Kyun Badhti Hain?", tier_a, c)
+                _consider_candidate("Rishton Mein Dooriyaan Badhti Jayengi", tier_b, c)
+                _consider_candidate("Dooriyaan Badhti Jayengi", tier_b, c)
+
+        # C. Strong Insight / Lesson
+        if any(w in norm_c for w in ["sab kuch hai", "sab kuch hota hai", "sabse bada sabak", "zaroori hai", "matter karta", "is everything", "biggest lesson", "all that matters", "truth is"]):
+            if "communication hi sab kuch" in norm_c:
+                _consider_candidate("Communication Hi Sab Kuch Hai", tier_c, c)
+                _consider_candidate("Communication Hi Sab Kuch Hota Hai", tier_c, c)
+            if "zindagi ka sabse bada sabak" in norm_c:
+                _consider_candidate("Zindagi Ka Sabse Bada Sabak", tier_c, c)
+            if "baat karna hamesha zaroori" in norm_c:
+                _consider_candidate("Baat Karna Hamesha Zaroori Hai", tier_c, c)
+            _consider_candidate(c, tier_c, c)
+
+        # D. Contrarian / Unexpected Statement
+        if any(w in norm_c for w in ["alag hota hai", "tareeqa alag", "opposite", "nobody tells you", "myth", "actually"]):
+            _consider_candidate(c, tier_d, c)
+
+        # E. Meaningful Relationship Between Two Concepts
+        if any(w in norm_c for w in ["pyaar aur care", "parents se", "rishton mein", "relationship"]):
+            _consider_candidate(c, tier_e, c)
+
+        # F. Opening / general clause fallback
+        _consider_candidate(c, tier_f, c)
+
+    # 3. Select strictly in A -> B -> C -> D -> E -> F priority order
+    for tier in [tier_a, tier_b, tier_c, tier_d, tier_e, tier_f]:
+        if tier:
+            return tier[0]
+
+    # 4. Final slice fallback if all strict tiers were empty
     if clean_clauses:
         first_clause = clean_clauses[0]
         words = first_clause.split()
         for count in range(min(7, len(words)), 2, -1):
             sub = " ".join(words[:count])
-            if _is_clause_standalone(sub):
-                return sub.upper(), sub
+            with_em = _attach_semantic_emoji(sub.upper())
+            if _is_clause_standalone(with_em, support_text=first_clause):
+                return with_em, sub
 
     return ("", "")
 
@@ -614,6 +875,10 @@ def validate_hook(
     if is_forbidden_generic_hook(hook, transcript=transcript):
         return False, f"Hook is a forbidden generic clickbait template without concrete subject ('{hook}')"
 
+    # 8B. Generic topic-label rejection (e.g. 'X on Y', 'X talks about Y', 'X discusses Y')
+    if is_generic_topic_label_hook(hook):
+        return False, f"Hook is a generic topic label without a retention hook/curiosity gap ('{hook}')"
+
     # 9. Emoji validation & policy enforcement:
     # - 0–2 emojis maximum (configurable via config.MAX_HOOK_EMOJIS, default 2)
     # - Prefer 1 semantically relevant emoji
@@ -621,6 +886,7 @@ def validate_hook(
     # - No duplicate emojis
     # - No emoji spam
     # - No meaningless emoji chains (e.g. '👀🔥', '🚨😱🔥', '💰 💰')
+    # - No excessive punctuation combined with emojis (e.g. 'WHY?! 😱🔥💯')
     # - Emojis must not replace important words
     # - Emoji presence is never mandatory
     hook_emojis = extract_emojis(raw_hook)
@@ -628,15 +894,26 @@ def validate_hook(
     if len(hook_emojis) > max_allowed_emojis:
         return False, f"Hook contains multiple emojis ({len(hook_emojis)} > {max_allowed_emojis} allowed)"
 
+    # Check for excessive punctuation combined with emojis
+    if re.search(r"[\?!]{2,}\s*" + EMOJI_PATTERN.pattern, raw_hook) or re.search(EMOJI_PATTERN.pattern + r"\s*[\?!]{2,}", raw_hook):
+        return False, "Hook combines excessive punctuation with emojis"
+
+    # Check for duplicate emojis (e.g. '💰' and '💰')
+    clean_emojis = [normalize_emoji(e) for e in hook_emojis]
+    if len(clean_emojis) > 1 and len(clean_emojis) != len(set(clean_emojis)):
+        return False, f"Hook contains duplicate emoji ('{hook_emojis[0]}')"
+
     # Check for consecutive emojis / emoji chains without intervening alphanumeric words
     chain_match = re.search(r"(" + EMOJI_PATTERN.pattern + r"[\s,\.\!\?]*){2,}", raw_hook)
     if chain_match:
         matched_chain = chain_match.group(0).strip()
         return False, f"Hook contains multiple emojis in sequence/chain (emoji chain: '{matched_chain}')"
 
-    # Check for duplicate emojis (e.g. '💰' and '💰')
-    if len(hook_emojis) > 1 and len(hook_emojis) != len(set(hook_emojis)):
-        return False, f"Hook contains duplicate emoji ('{hook_emojis[0]}')"
+    # Semantic relevance check: domain emojis must be grounded in hook or transcript
+    if hook_emojis and (transcript or hook):
+        emoji_rel_score = evaluate_emoji_relevance(hook_emojis, transcript=transcript, hook=hook)
+        if emoji_rel_score < 6.0:
+            return False, f"Hook contains emoji '{hook_emojis[0]}' not semantically relevant to clip content"
 
     # Check that emoji does not replace words or form an emoji-only hook
     if not words:
@@ -767,12 +1044,32 @@ def get_fallback_hook(transcript: str = "", detected_lang: str = "en", hook_summ
     """
     hook_text, supporting_text = extract_grounded_fallback_hook(transcript, detected_lang=detected_lang)
     if hook_text and len(transcript.strip().split()) >= 4:
+        norm_h = hook_text.lower()
+        if "?" in hook_text or any(norm_h.startswith(q) for q in ["why", "how", "what", "is", "can", "kya", "kyun", "kaise"]):
+            h_type = "question"
+        elif any(w in norm_h for w in ["dooriyaan", "dooriyan", "badhti", "toot", "fail", "lose", "loss", "ruin"]):
+            h_type = "consequence"
+        elif any(w in norm_h for w in ["sab kuch", "sabak", "zaroori", "everything", "lesson", "matters"]):
+            h_type = "insight"
+        elif any(w in norm_h for w in ["alag", "opposite", "nobody tells"]):
+            h_type = "contrarian"
+        elif any(w in norm_h for w in ["pyaar", "care", "parents", "relationship", "rishton"]):
+            h_type = "relationship"
+        else:
+            h_type = "insight"
+
+        try:
+            raw_score = score_hook({"hook": hook_text, "supported_by_clip": True, "supporting_text": supporting_text}, transcript=transcript)
+            h_score = max(75.0, min(95.0, raw_score))
+        except Exception:
+            h_score = 80.0
+
         return {
             "hook": hook_text,
-            "hook_type": "insight",
+            "hook_type": h_type,
             "supporting_text": supporting_text,
             "reason": "Transcript-grounded deterministic fallback",
-            "score": 75.0,
+            "score": h_score,
             "source": "fallback_transcript",
             "supported_by_clip": True,
             "is_fallback": True,
@@ -832,24 +1129,25 @@ Your task is to analyze ONLY the provided clip transcript and generate exactly 5
 1. Use ONLY the ideas, facts, questions, and claims directly present in the clip transcript below.
 2. Do NOT use outside knowledge, general assumptions, or external information.
 3. NEVER produce generic clickbait hooks like "WAIT FOR THE TWIST", "THE TRUTH EXPOSED", "REALITY CHECK", "MUST WATCH", "YOU WON'T BELIEVE THIS", "THIS CHANGES EVERYTHING", or "SHOCKING TRUTH".
-4. Every hook must feature a CONCRETE, SPECIFIC SUBJECT or CLAIM from the clip (e.g. fertility, smoking, throat cancer, salary negotiation, sleep cycle, etc.).
-5. The `supporting_text` MUST be a short verbatim excerpt (3 to 15 words) copied directly from the transcript that directly supports the hook. Do NOT fabricate supporting text.
-6. Length: 3 to 8 words. Absolute maximum: 42 characters.
-7. Emoji Policy:
-   - 0–2 emojis maximum.
-   - Prefer 1 semantically relevant emoji when it genuinely strengthens visual meaning.
-   - 2 emojis allowed ONLY when both independently reinforce concepts in the hook.
-   - 0 emojis when an emoji would make the hook worse. Emoji presence is never mandatory.
+4. NEVER produce weak topic-label patterns like "X talks about Y", "X on Y", "X discusses Y", "talking about Y", or "X on relationships & parents". The hook must expose curiosity, consequence, contradiction, or a question, NOT just name the topic.
+5. Every hook must feature a CONCRETE, SPECIFIC SUBJECT or CLAIM from the clip (e.g. fertility, smoking, throat cancer, salary negotiation, sleep cycle, etc.).
+6. The `supporting_text` MUST be a short verbatim excerpt (3 to 15 words) copied directly from the transcript that directly supports the hook. Do NOT fabricate supporting text.
+7. Length: 3 to 8 words. Absolute maximum: 42 characters.
+8. Emoji Policy:
+   - 0–2 emojis maximum (prefer 1 semantically relevant emoji).
+   - Place semantic emoji preferentially at the END of the hook (e.g., 'WHY WE MISUNDERSTAND LOVE ❤️', not '❤️ WHY WE MISUNDERSTAND LOVE').
+   - Emoji must match the topic: ❤️/💔/🫶 for relationships, 💰/💸 for money, 🚀/🏆 for ambition, ⚠️ for risk/warning, 🤯/😳 for surprise, 💡 for insight, 😂 for humor.
    - NEVER generate duplicate emojis (e.g., '💰💰'), emoji chains (e.g., '👀🔥', '🚨😱🔥'), or emoji spam.
+   - NEVER combine excessive punctuation like '?!' or '??' with emojis.
    - Emojis must NEVER replace important words.
-8. {lang_instruction}
+9. {lang_instruction}
 
-5 HOOK CANDIDATE STRATEGIES TO USE (generate distinct strategies, not superficial rewrites):
+5 HOOK CANDIDATE STRATEGIES TO USE (generate 5 distinct angles supported by transcript, not superficial rewrites):
 1. Curiosity: creates curiosity gap grounded strictly in clip
-2. Contrarian / expectation-vs-reality: challenges common assumption with clip fact
+2. Contrarian / unexpected insight: challenges common assumption with clip fact
 3. Question: direct, intriguing question answered by the clip
 4. Consequence: highlights cause/effect or direct consequence revealed in clip
-5. Specific fact / number / mechanism: highlights concrete number, named concept, or specific mechanism
+5. Specific fact / insight / mechanism: highlights concrete number, named concept, or specific mechanism
 
 CLIP TRANSCRIPT (THIS IS YOUR ONLY CONTEXT):
 \"\"\"

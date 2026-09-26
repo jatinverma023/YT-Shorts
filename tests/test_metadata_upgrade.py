@@ -468,6 +468,8 @@ class TestIntegrationMetadataPipeline(unittest.TestCase):
     """Integration tests verifying end-to-end flow and pipeline invariants (Section 25 & Review Corrections)."""
 
     def setUp(self):
+        from ai_rate_limiter import shared_rate_limiter
+        shared_rate_limiter._history.clear()
         self.clip_transcript = (
             "Why starting early makes compound interest so powerful. When you invest for thirty years, "
             "most of your returns come in the final decade through exponential growth."
