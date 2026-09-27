@@ -260,10 +260,10 @@ def _get_llm_client():
     if not api_key:
         return None, None
     if api_key.startswith("gsk_") or GROQ_API_KEY:
-        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1", max_retries=0)
         model = _resolve_groq_model(client, configured_model=GROQ_CHAT_MODEL)
         return client, model
-    return OpenAI(api_key=api_key), "gpt-4o-mini"
+    return OpenAI(api_key=api_key, max_retries=0), "gpt-4o-mini"
 
 
 def _format_segments_to_lines(segments: list) -> list:
@@ -378,13 +378,23 @@ Respond ONLY with valid JSON in this exact structure:
 """
     try:
         def _api_call():
-            return client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=1500,
-                response_format={"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower()) else None,
-            )
+            extra_body = {}
+            # Reasoning models on Groq (such as openai/gpt-oss-20b) require hiding reasoning tokens
+            # so that thinking tags do not leak into the JSON output stream and cause json_validate_failed.
+            if "gpt-oss" in model.lower() or "openai/" in model.lower() or "qwen" in model.lower():
+                extra_body = {"reasoning_format": "hidden"}
+
+            kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.4,
+                "max_tokens": 1500,
+                "response_format": {"type": "json_object"} if ("llama" in model.lower() or "gpt" in model.lower() or "qwen" in model.lower()) else None,
+            }
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+
+            return client.chat.completions.create(**kwargs)
 
         response = call_with_rate_limit(
             client_fn=_api_call,

@@ -165,7 +165,7 @@ Hope this helps increase your audience retention!"""
     @patch("metadata_ai.log.warning")
     def test_missing_api_key_fallback(self, mock_log_warn):
         """When neither GROQ_API_KEY nor OPENAI_API_KEY is configured, uses fallback and logs clearly."""
-        with patch.object(config, "GROQ_API_KEY", ""), patch.object(config, "OPENAI_API_KEY", ""):
+        with patch.object(config, "GROQ_API_KEY", ""), patch.object(config, "OPENAI_API_KEY", ""), patch.dict(os.environ, {"GROQ_API_KEY": "", "OPENAI_API_KEY": ""}):
             res = metadata_ai.generate_shorts_metadata(
                 "interview_clip_vidssave.com_720p.mp4",
                 transcript="Some spoken words here.",

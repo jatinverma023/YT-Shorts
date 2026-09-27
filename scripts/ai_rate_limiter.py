@@ -208,11 +208,16 @@ def call_with_rate_limit(
     and bounded HTTP 429 retry-after handling.
     """
     limiter = rate_limiter or shared_rate_limiter
-    estimated = estimate_request_tokens(prompt_or_messages, max_tokens=max_tokens)
+    prompt_tokens = estimate_request_tokens(prompt_or_messages, max_tokens=0)
+    completion_budget = max(0, int(max_tokens or 0))
+    estimated = prompt_tokens + completion_budget
 
     retries_429 = 0
+    reserved_current = False
     while True:
-        limiter.acquire(estimated)
+        if not reserved_current:
+            limiter.acquire(estimated)
+            reserved_current = True
         try:
             return client_fn()
         except Exception as e:
@@ -232,9 +237,21 @@ def call_with_rate_limit(
                 )
                 if limiter.sleep_fn is not time.sleep or os.environ.get("RATE_LIMITER_NO_SLEEP") != "1":
                     limiter.sleep_fn(backoff)
+
+                # Release the previous attempt's reservation before re-acquiring,
+                # ensuring the retry remains governed by TokenAwareRateLimiter without
+                # double-reserving or inflating rolling history for the same request.
+                if hasattr(limiter, "refund"):
+                    limiter.refund(estimated)
+                reserved_current = False
                 continue
 
-            # Refund reserved tokens on non-429 client errors (e.g. HTTP 400 json_validate_failed)
+            # On HTTP 400 or non-429 client errors, the provider has already received
+            # and processed the input prompt against our TPM quota.
+            # To prevent downstream burst 429s, RETAIN prompt_tokens in the rolling window
+            # and refund only the demonstrably unused completion budget.
             if not is_429 and hasattr(limiter, "refund"):
-                limiter.refund(estimated)
+                unused_completion = max(0, estimated - prompt_tokens)
+                if unused_completion > 0:
+                    limiter.refund(unused_completion)
             raise

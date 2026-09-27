@@ -38,14 +38,14 @@ class TestPhase2ModelSelection(unittest.TestCase):
         return mock_client
 
     def test_new_production_model_is_configured_default(self):
-        """Phase 4.1: The new production model (openai/gpt-oss-20b) is the configured default."""
-        self.assertEqual(config.DEFAULT_GROQ_CHAT_MODEL, "openai/gpt-oss-20b")
+        """Phase 4.1: The new production model (qwen/qwen3.8-27b) is the configured default."""
+        self.assertEqual(config.DEFAULT_GROQ_CHAT_MODEL, "qwen/qwen3.8-27b")
 
     def test_test5_explicit_configured_model_exists_is_used(self):
         """TEST 5: Explicit configured model exists -> exactly that model is used."""
         client = self._make_mock_client(["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"])
-        resolved = _resolve_groq_model(client, configured_model="openai/gpt-oss-20b")
-        self.assertEqual(resolved, "openai/gpt-oss-20b")
+        resolved = _resolve_groq_model(client, configured_model="qwen/qwen3.8-27b")
+        self.assertEqual(resolved, "qwen/qwen3.8-27b")
 
     def test_test6_explicit_configured_model_not_exist_fails_fast(self):
         """TEST 6: Explicit configured model does not exist -> clear configuration failure, NO arbitrary substitution."""
@@ -65,7 +65,7 @@ class TestPhase2ModelSelection(unittest.TestCase):
         with patch.object(clip_detection, "GROQ_CHAT_MODEL", ""):
             resolved = _resolve_groq_model(client, configured_model=None)
             self.assertEqual(resolved, config.DEFAULT_GROQ_CHAT_MODEL)
-            self.assertEqual(resolved, "openai/gpt-oss-20b")
+            self.assertEqual(resolved, "qwen/qwen3.8-27b")
 
     def test_test7b_absent_default_model_fails_if_default_not_on_provider(self):
         """TEST 7b: If default model is also not on provider, fail fast with ModelConfigurationError."""
@@ -76,15 +76,15 @@ class TestPhase2ModelSelection(unittest.TestCase):
 
     def test_all_three_subsystems_resolve_same_model(self):
         """Phase 4.2: All three AI subsystems (discovery, metadata, hooks) resolve the same model."""
-        client = self._make_mock_client(["openai/gpt-oss-20b"])
+        client = self._make_mock_client(["qwen/qwen3.8-27b"])
         with patch.object(clip_detection, "GROQ_CHAT_MODEL", ""):
             model_discovery = clip_detection._resolve_groq_model(client, configured_model=None)
             model_metadata = metadata_ai._resolve_groq_model(client, configured_model=None)
             model_hooks = hook_generator._resolve_groq_model(client, configured_model=None)
 
-            self.assertEqual(model_discovery, "openai/gpt-oss-20b")
-            self.assertEqual(model_metadata, "openai/gpt-oss-20b")
-            self.assertEqual(model_hooks, "openai/gpt-oss-20b")
+            self.assertEqual(model_discovery, "qwen/qwen3.8-27b")
+            self.assertEqual(model_metadata, "qwen/qwen3.8-27b")
+            self.assertEqual(model_hooks, "qwen/qwen3.8-27b")
             self.assertEqual(model_discovery, model_metadata)
             self.assertEqual(model_metadata, model_hooks)
 
@@ -101,7 +101,7 @@ class TestPhase2ModelSelection(unittest.TestCase):
         self.assertIsNotNone(match, "Could not find GROQ_CHAT_MODEL default in pipeline.yml")
         workflow_default = match.group(1)
         self.assertEqual(workflow_default, config.DEFAULT_GROQ_CHAT_MODEL)
-        self.assertEqual(workflow_default, "openai/gpt-oss-20b")
+        self.assertEqual(workflow_default, "qwen/qwen3.8-27b")
 
     def test_no_obsolete_llama_in_active_production_config(self):
         """Phase 4.6: No reference to llama-3.3-70b-versatile remains in active production configuration."""
@@ -121,13 +121,13 @@ class TestPhase2ModelSelection(unittest.TestCase):
 
     def test_no_gpt_oss_120b_as_automatic_fallback(self):
         """Phase 4.7: No reference to openai/gpt-oss-120b exists as an automatic fallback."""
-        # If openai/gpt-oss-120b is the only model available from provider, but configured default is gpt-oss-20b,
+        # If openai/gpt-oss-120b is the only model available from provider, but configured default is qwen/qwen3.8-27b,
         # the system must NOT automatically fall back to gpt-oss-120b.
         client = self._make_mock_client(["openai/gpt-oss-120b"])
         with patch.object(clip_detection, "GROQ_CHAT_MODEL", ""):
             with self.assertRaises(ModelConfigurationError) as ctx:
                 _resolve_groq_model(client, configured_model=None)
-            self.assertIn("openai/gpt-oss-20b", str(ctx.exception))
+            self.assertIn("qwen/qwen3.8-27b", str(ctx.exception))
 
 
 if __name__ == "__main__":

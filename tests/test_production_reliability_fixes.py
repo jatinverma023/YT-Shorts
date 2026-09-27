@@ -137,8 +137,11 @@ class TestRateLimiterRefundFixes(unittest.TestCase):
             )
 
         self.assertIn("400", str(ctx.exception))
-        # Rolling usage must be 0 because tokens were refunded!
-        self.assertEqual(limiter.get_rolling_usage(1000.0), 0)
+        # Prompt tokens must be retained in rolling history so provider-side prompt accounting
+        # is preserved, while unused completion tokens (1500) are refunded.
+        usage_after_400 = limiter.get_rolling_usage(1000.0)
+        self.assertGreater(usage_after_400, 0)
+        self.assertLess(usage_after_400, 50)  # prompt tokens only (~8), completion budget (1500) refunded
 
     def test_call_with_rate_limit_does_not_refund_on_http_200(self):
         """Successful request retains token usage in rolling window."""

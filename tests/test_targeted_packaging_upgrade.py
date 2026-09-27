@@ -303,7 +303,7 @@ class TestTargetedPackagingUpgrade(unittest.TestCase):
 
     # 20. Metadata fallback produces useful hook/description/hashtags
     def test_20_metadata_fallback_produces_useful_metadata(self):
-        with patch.object(config, "GROQ_API_KEY", ""), patch.object(config, "OPENAI_API_KEY", ""):
+        with patch.object(config, "GROQ_API_KEY", ""), patch.object(config, "OPENAI_API_KEY", ""), patch.dict(os.environ, {"GROQ_API_KEY": "", "OPENAI_API_KEY": ""}):
             meta = metadata_ai.generate_shorts_metadata(
                 filename="Zakir Khan Relationships Podcast FO123.mp4",
                 transcript=self.relationship_transcript,

@@ -26,6 +26,8 @@ class TestPhase7Fallbacks(unittest.TestCase):
         
         with patch.object(config, "GROQ_API_KEY", ""), \
              patch.object(config, "OPENAI_API_KEY", ""), \
+             patch.object(hook_generator, "GROQ_API_KEY", ""), \
+             patch.object(hook_generator, "OPENAI_API_KEY", ""), \
              patch.dict(os.environ, {"GROQ_API_KEY": "", "OPENAI_API_KEY": ""}):
             res = hook_generator.generate_short_hook(
                 transcript=transcript,
