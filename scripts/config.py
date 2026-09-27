@@ -35,7 +35,8 @@ CLIP_QUEUE_TAB = os.environ.get("CLIP_QUEUE_TAB", "clip_queue").strip()
 # --- Multi-Clip Detection & Splitting ---
 MIN_CLIP_SECONDS = int(os.environ.get("MIN_CLIP_SECONDS", "20"))
 MAX_CLIP_SECONDS = int(os.environ.get("MAX_CLIP_SECONDS", "59"))
-MAX_CLIPS_PER_VIDEO = int(os.environ.get("MAX_CLIPS_PER_VIDEO", "5"))  # Legacy default
+TARGET_CLIPS_PER_VIDEO = int(os.environ.get("TARGET_CLIPS_PER_VIDEO", "4"))  # Desired target: 4 curated clips
+MAX_CLIPS_PER_VIDEO = int(os.environ.get("MAX_CLIPS_PER_VIDEO", "5"))        # Maximum upper cap: 5 clips
 MAX_DISCOVERY_CANDIDATES = int(os.environ.get("MAX_DISCOVERY_CANDIDATES", "100"))  # Technical safety ceiling against malformed LLM output; NOT a target or desired limit
 MIN_CLIP_QUALITY_SCORE = float(os.environ.get("MIN_CLIP_QUALITY_SCORE", "70.0"))
 CLIP_OVERLAP_THRESHOLD = float(os.environ.get("CLIP_OVERLAP_THRESHOLD", "0.35"))

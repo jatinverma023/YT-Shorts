@@ -20,6 +20,10 @@ from config import (
     CAPTION_MAX_CHARS_PER_LINE, CAPTION_MAX_WORDS, CAPTION_MARGIN_BOTTOM,
 )
 from transliterate import romanize_words, has_devanagari
+try:
+    from emoji_utils import format_ass_emoji
+except ImportError:
+    from scripts.emoji_utils import format_ass_emoji
 
 log = logging.getLogger("transcribe")
 
@@ -405,6 +409,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if has_devanagari(clean_punchline) and CAPTION_LANGUAGE_MODE == "romanized":
                 p_words = [{"word": w, "start": 0.0, "end": 0.0} for w in clean_punchline.split()]
                 clean_punchline = " ".join(pw["word"] for pw in romanize_words(p_words))
+            clean_punchline = format_ass_emoji(clean_punchline)
             p_start_str = _format_ass_time(0.0)
             p_end_str = _format_ass_time(p_end)
             dialogue_lines.append(
@@ -444,6 +449,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             def _render_word(w_obj, is_act):
                 clean_w = _sanitize_ass(w_obj.get("word", ""))
+                clean_w = format_ass_emoji(clean_w)
                 if is_act:
                     # Active word: Highlight color + 10% pop scale, then return to base style
                     return f"{{\\c{CAPTION_HIGHLIGHT_COLOR}\\fscx110\\fscy110}}{clean_w}{{\\c{CAPTION_BASE_COLOR}\\fscx100\\fscy100}}"

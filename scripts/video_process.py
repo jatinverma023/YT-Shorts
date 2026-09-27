@@ -449,7 +449,12 @@ def build_ffmpeg_filter(
     # 4. Subtitle burning filter (applied LAST to visual canvas)
     if ass_path and os.path.isfile(ass_path):
         ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        sub_filter = f"subtitles='{ass_escaped}'"
+        fonts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "fonts"))
+        if os.path.isdir(fonts_dir):
+            fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+            sub_filter = f"subtitles='{ass_escaped}':fontsdir='{fonts_dir_escaped}'"
+        else:
+            sub_filter = f"subtitles='{ass_escaped}'"
     else:
         sub_filter = "null"
 

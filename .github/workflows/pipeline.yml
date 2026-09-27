@@ -33,7 +33,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install ffmpeg and fonts
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-core fonts-deva fonts-freefont-ttf fonts-dejavu-core
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-core fonts-deva fonts-freefont-ttf fonts-dejavu-core fonts-symbola
+          mkdir -p ~/.local/share/fonts
+          cp assets/fonts/*.ttf ~/.local/share/fonts/ 2>/dev/null || true
+          fc-cache -f || true
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt

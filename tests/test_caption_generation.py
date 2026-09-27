@@ -183,8 +183,9 @@ class TestCaptionGeneration(unittest.TestCase):
             # Check HeaderPunchline style definition (Alignment 8)
             self.assertIn("Style: HeaderPunchline", content)
             self.assertIn(f",8,50,50,{config.PUNCHLINE_MARGIN_TOP},1", content)
-            # Check HeaderPunchline dialogue line
-            self.assertIn("Dialogue: 1,0:00:00.00,0:00:25.00,HeaderPunchline,,0,0,0,,Khan Sir with Raj Shamani 🥰", content)
+            # Check HeaderPunchline dialogue line with emoji formatting
+            self.assertIn("Dialogue: 1,0:00:00.00,0:00:25.00,HeaderPunchline,,0,0,0,,Khan Sir with Raj Shamani", content)
+            self.assertIn("Noto Emoji Regular", content)
         finally:
             if os.path.exists(ass_path):
                 os.remove(ass_path)
@@ -264,7 +265,8 @@ class TestCaptionGeneration(unittest.TestCase):
 
             # 1. Header punchline is separate and unaffected
             self.assertEqual(len(header_events), 1)
-            self.assertIn("Podcast Hook 🔥", header_events[0])
+            self.assertIn("Podcast Hook", header_events[0])
+            self.assertIn("Noto Emoji Regular", header_events[0])
 
             # 2. Exactly 8 dialogue events for the 8-word phrase
             self.assertEqual(len(caption_events), 8)

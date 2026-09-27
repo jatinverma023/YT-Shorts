@@ -10,7 +10,7 @@ from openai import OpenAI
 
 from config import (
     GROQ_API_KEY, OPENAI_API_KEY, GROQ_CHAT_MODEL, DEFAULT_GROQ_CHAT_MODEL,
-    MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, MAX_CLIPS_PER_VIDEO,
+    MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, TARGET_CLIPS_PER_VIDEO, MAX_CLIPS_PER_VIDEO,
     MAX_DISCOVERY_CANDIDATES,
     MIN_CLIP_QUALITY_SCORE, CLIP_OVERLAP_THRESHOLD,
     MIN_STANDALONE_SCORE,
@@ -342,9 +342,15 @@ Each Short must be self-contained:
 2. Core Insight: One clear argument, insight, explanation, or story.
 3. Payoff: Satisfying conclusion, resolution, or takeaway.
 
-AVOID: Greetings, sponsor reads, incomplete answers, setup without payoff, or clips requiring outside context.
+PRIORITIZE:
+- Major insights, memorable stories, strong opinions, surprising revelations, useful lessons, emotional moments, strong conclusions, and controversial/interesting perspectives.
 
-Return at most 3 genuinely strong standalone moments (or an empty list if none meet standards).
+AVOID:
+- Generic statements, setup-only dialogue, repetitive statements, ordinary conversation, low-information remarks, fragments, minor anecdotes without payoff, greetings, sponsor reads, or clips requiring outside context.
+
+CRITICAL RULE:
+- Do not return multiple candidates that represent the same underlying insight merely with different wording.
+- Return at most 3 genuinely strong standalone moments (or an empty list if none meet standards).
 
 Requirements:
 1. Return AT MOST 3 candidate clips.
@@ -501,25 +507,287 @@ def detect_clips_from_transcript(
         log.warning("AI clip detection failed across all transcript chunks. Returning zero valid clips.")
         raise ClipDiscoveryError("AI clip discovery failed across all transcript chunks (all LLM calls failed).")
 
-    # Globally run quality filtering, standalone validation, and deduplication across all chunks
-    validated = _validate_and_filter_clips(
+    # 1. Globally run quality filtering, standalone validation, and deduplication across all chunks
+    # (Global candidate pool preserves all valid candidates without premature count truncation)
+    validated_pool = _validate_and_filter_clips(
         all_raw_clips,
         total_duration,
         min_clip_seconds,
         max_clip_seconds,
-        max_clips=max_clips,
+        max_clips=None,
     )
-    if validated:
-        log.info("Successfully detected and scored %d high-retention clips.", len(validated))
-        return validated
-    elif all_raw_clips:
-        log.info(
-            "AI suggested %d candidate(s), but none met the quality/standalone threshold or survived deduplication. Returning empty list.",
-            len(all_raw_clips),
-        )
+    if not validated_pool:
+        if all_raw_clips:
+            log.info(
+                "AI suggested %d candidate(s), but none met the quality/standalone threshold or survived deduplication. Returning empty list.",
+                len(all_raw_clips),
+            )
         return []
 
-    return []
+    # 2. GLOBAL topic-aware selection: select strongest distinct topic representatives (target 4, max 5)
+    effective_max = max_clips if max_clips is not None else MAX_CLIPS_PER_VIDEO
+    curated_clips = select_topic_diverse_clips(
+        validated_pool,
+        target_clips=TARGET_CLIPS_PER_VIDEO,
+        max_clips=effective_max,
+        overlap_threshold=CLIP_OVERLAP_THRESHOLD,
+    )
+    log.info(
+        "Successfully curated %d topic-diverse clips (from %d validated candidates in global pool).",
+        len(curated_clips), len(validated_pool)
+    )
+    return curated_clips
+
+
+# --- Topic & Thematic Diversity Analysis ---
+
+TOPIC_STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can", "can't", "cannot", "could",
+    "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down",
+    "during", "each", "few", "for", "from", "further", "had", "hadn't", "has",
+    "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her",
+    "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's",
+    "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it",
+    "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or",
+    "other", "ought", "our", "ours", "ourselves", "out", "over", "own", "same",
+    "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so",
+    "some", "such", "than", "that", "that's", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "there's", "these", "they", "they'd", "they'll",
+    "they're", "they've", "this", "those", "through", "to", "too", "under", "until",
+    "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were",
+    "weren't", "what", "what's", "when", "when's", "where", "where's", "which",
+    "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
+    "yourself", "yourselves",
+    # Domain filler words in candidate summaries/topics
+    "explains", "details", "shows", "discusses", "talks", "reveals", "key", "moment",
+    "topic", "candidate", "insight", "clip", "part", "video", "segment", "hook",
+    "speaker", "describes", "argues", "believes", "shares", "anecdote", "shorts",
+    "thing", "things", "way", "ways", "people", "person", "life",
+    "test", "title", "great", "aspect", "subtopic", "discussion", "discussions",
+    "lesson", "lessons", "perspective", "views",
+}
+
+TOPIC_SYNONYMS = {
+    "parenting": "parent", "parental": "parent", "parents": "parent",
+    "father": "parent", "dad": "parent", "mother": "parent", "mom": "parent",
+    "family": "family", "families": "family",
+    "childhood": "child", "children": "child", "kids": "child", "kid": "child",
+    "school": "child",
+    "relationships": "relationship", "relation": "relationship", "relations": "relationship",
+    "dating": "relationship", "partner": "relationship", "breakup": "relationship",
+    "heartbreak": "relationship", "romance": "relationship", "romantic": "relationship", "marriage": "relationship",
+    "addictions": "addict", "addiction": "addict", "addicted": "addict",
+    "substance": "addict", "substances": "addict", "abuse": "addict", "abusing": "addict",
+    "drug": "addict", "drugs": "addict", "rehab": "addict", "escapism": "addict",
+    "bollywood": "cinema", "cinema": "cinema", "acting": "cinema", "actor": "cinema",
+    "actress": "cinema", "movie": "cinema", "movies": "cinema", "film": "cinema", "films": "cinema",
+    "discipline": "disciplin", "disciplined": "disciplin",
+    "privilege": "privileg", "privileged": "privileg",
+    "success": "success", "successful": "success",
+    "depression": "depress", "depressed": "depress", "melancholy": "depress",
+    "generosity": "generos", "generous": "generos",
+    "struggle": "struggl", "struggles": "struggl", "struggling": "struggl",
+    "money": "money", "wealth": "money", "rich": "money", "financial": "money",
+}
+
+CORE_THEME_KEYS = {
+    "parent", "child", "relationship", "addict", "cinema",
+    "privileg", "disciplin", "depress", "generos", "money"
+}
+
+
+def extract_topic_stems(text: str) -> set:
+    """Extracts normalized content word stems for topic comparison."""
+    if not text:
+        return set()
+    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+    stems = set()
+    for w in words:
+        if w in TOPIC_STOP_WORDS:
+            continue
+        if w in TOPIC_SYNONYMS:
+            stems.add(TOPIC_SYNONYMS[w])
+            continue
+        for suffix in ["tion", "tions", "ment", "ments", "ing", "ies", "es", "ed", "al", "ity", "ive", "ly", "er", "s"]:
+            if len(w) > len(suffix) + 3 and w.endswith(suffix):
+                w = w[:-len(suffix)]
+                break
+        if w in TOPIC_SYNONYMS:
+            stems.add(TOPIC_SYNONYMS[w])
+            continue
+        if w not in TOPIC_STOP_WORDS and len(w) >= 3:
+            stems.add(w)
+    return stems
+
+
+class TopicMatchResult(tuple):
+    def __new__(cls, is_same: bool, reason: str):
+        return super().__new__(cls, (is_same, reason))
+
+    @property
+    def is_same(self):
+        return self[0]
+
+    @property
+    def reason(self):
+        return self[1]
+
+    def __bool__(self):
+        return bool(self[0])
+
+
+def are_same_topic(cand1, cand2) -> TopicMatchResult:
+    """
+    Determines deterministically if two candidates belong to the same topic/theme.
+    Accepts candidate dicts or topic strings.
+    Returns TopicMatchResult which acts as (is_same: bool, reason: str) and evaluates to bool.
+    """
+    if isinstance(cand1, str):
+        cand1 = {"topic": cand1}
+    if isinstance(cand2, str):
+        cand2 = {"topic": cand2}
+
+    topic1 = cand1.get("topic", "")
+    topic2 = cand2.get("topic", "")
+    summary1 = cand1.get("topic_summary", "") or cand1.get("hook_summary", "")
+    summary2 = cand2.get("topic_summary", "") or cand2.get("hook_summary", "")
+
+    t_stems1 = extract_topic_stems(topic1)
+    t_stems2 = extract_topic_stems(topic2)
+    s_stems1 = extract_topic_stems(summary1)
+    s_stems2 = extract_topic_stems(summary2)
+
+    t_inter = t_stems1.intersection(t_stems2)
+    t_union = t_stems1.union(t_stems2)
+    t_jaccard = len(t_inter) / len(t_union) if t_union else 0.0
+
+    s_inter = s_stems1.intersection(s_stems2)
+    s_union = s_stems1.union(s_stems2)
+    s_jaccard = len(s_inter) / len(s_union) if s_union else 0.0
+
+    has_time = ("start_time" in cand1 or "start" in cand1) and ("start_time" in cand2 or "start" in cand2)
+    st1 = float(cand1.get("start_time", cand1.get("start", 0.0)))
+    st2 = float(cand2.get("start_time", cand2.get("start", 0.0)))
+    time_diff = abs(st1 - st2)
+
+    # 1. Direct topic keyword overlap (>= 2 stems or >= 0.30 Jaccard)
+    if len(t_inter) >= 2 or t_jaccard >= 0.30:
+        return TopicMatchResult(True, f"Direct topic overlap: {t_inter}")
+
+    # 2. Match on core thematic concept in topic
+    core_match = t_inter.intersection(CORE_THEME_KEYS)
+    if core_match:
+        return TopicMatchResult(True, f"Core theme match: {core_match}")
+
+    # 3. High semantic summary overlap (>= 2 non-stop content stems and >= 0.40 Jaccard)
+    if len(s_inter) >= 2 and s_jaccard >= 0.40:
+        return TopicMatchResult(True, f"Semantic summary overlap: {s_inter}")
+
+    # 4. Temporal proximity (< 180s) sharing at least one topic stem
+    if has_time and time_diff < 180.0 and len(t_inter) >= 1:
+        return TopicMatchResult(True, f"Temporal proximity ({time_diff:.0f}s) with shared topic stem: {t_inter}")
+
+    return TopicMatchResult(False, "Distinct topics")
+
+
+def select_topic_diverse_clips(
+    candidates: list,
+    target_clips: int = TARGET_CLIPS_PER_VIDEO,
+    max_clips: int = MAX_CLIPS_PER_VIDEO,
+    overlap_threshold: float = CLIP_OVERLAP_THRESHOLD,
+    min_quality_score: float = MIN_CLIP_QUALITY_SCORE,
+    min_standalone_score: float = MIN_STANDALONE_SCORE,
+    **kwargs,
+) -> list:
+    target_clips = kwargs.get("target_count", target_clips)
+    max_clips = kwargs.get("max_count", max_clips)
+    min_quality_score = kwargs.get("min_quality_score", min_quality_score)
+    min_standalone_score = kwargs.get("min_standalone_score", min_standalone_score)
+
+    if not candidates:
+        return []
+
+    # 0. Enforce strict quality and standalone validation gates
+    valid_cands = [
+        c for c in candidates
+        if float(c.get("quality_score", 0.0)) >= min_quality_score
+        and float(c.get("standalone_score", 0.0)) >= min_standalone_score
+    ]
+    if not valid_cands:
+        return []
+
+    if len(valid_cands) == 1:
+        c = valid_cands[0].copy()
+        c["clip_index"] = 1
+        return [c]
+
+    # Deterministic sort by quality_score descending (with tie-breakers: standalone_score, payoff, hook)
+    def _rank_key(c):
+        raw_scores = c.get("scores") or c.get("quality_scores") or {}
+        payoff = float(raw_scores.get("payoff_completion", raw_scores.get("payoff", 0.0)))
+        hook = float(raw_scores.get("hook_strength", 0.0))
+        return (
+            float(c.get("quality_score", 0.0)),
+            float(c.get("standalone_score", 0.0)),
+            payoff,
+            hook,
+            -float(c.get("start_time", c.get("start", 0.0)))
+        )
+
+    sorted_cands = sorted(valid_cands, key=_rank_key, reverse=True)
+
+    # 1. Cluster candidates by dominant topic/theme
+    # Candidates with the same topic compete; only the champion (highest scoring) represents that topic.
+    clusters = []
+    for cand in sorted_cands:
+        matched_cluster = None
+        for cl in clusters:
+            is_same, _ = are_same_topic(cand, cl[0])
+            if is_same:
+                matched_cluster = cl
+                break
+        if matched_cluster is not None:
+            matched_cluster.append(cand)
+        else:
+            clusters.append([cand])
+
+    # 2. Select distinct topic representatives
+    selected = []
+    for cl in clusters:
+        champ = cl[0]
+        # Check temporal overlap against already selected clips
+        has_temporal_conflict = False
+        for sel in selected:
+            st1, et1 = float(champ.get("start_time", champ.get("start", 0.0))), float(champ.get("end_time", champ.get("end", 0.0)))
+            st2, et2 = float(sel.get("start_time", sel.get("start", 0.0))), float(sel.get("end_time", sel.get("end", 0.0)))
+            dur1 = max(1.0, et1 - st1)
+            dur2 = max(1.0, et2 - st2)
+            overlap_st = max(st1, st2)
+            overlap_et = min(et1, et2)
+            overlap_dur = max(0.0, overlap_et - overlap_st)
+            overlap_ratio = overlap_dur / min(dur1, dur2)
+            if overlap_ratio >= overlap_threshold:
+                has_temporal_conflict = True
+                break
+
+        if not has_temporal_conflict:
+            champ_copy = champ.copy()
+            champ_copy["topic_cluster_size"] = len(cl)
+            selected.append(champ_copy)
+
+        if len(selected) >= max_clips:
+            break
+
+    # 3. Sort chronologically and assign stable 1-based clip_index
+    chrono = sorted(selected, key=lambda x: (float(x.get("start_time", x.get("start", 0.0))), float(x.get("end_time", x.get("end", 0.0)))))
+    for idx, c in enumerate(chrono, start=1):
+        c["clip_index"] = idx
+
+    return chrono
 
 
 def _is_similar_summary(summary1: str, summary2: str, threshold: float = 0.60) -> bool:
