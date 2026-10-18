@@ -14,6 +14,8 @@ YouTube uploads on behalf of a real channel require OAuth2 user credentials
 """
 import logging
 
+from google.auth.exceptions import RefreshError
+import google.auth.transport.requests
 import google.oauth2.credentials
 import googleapiclient.discovery
 import googleapiclient.http
@@ -25,6 +27,11 @@ from config import (
 )
 
 log = logging.getLogger("youtube_upload")
+
+
+class YouTubeAuthenticationError(Exception):
+    """Raised when YouTube OAuth credentials are missing, invalid, expired, or revoked."""
+    pass
 
 
 class YouTubeQuotaExceededError(Exception):
@@ -55,8 +62,21 @@ def is_quota_exceeded_error(error: Exception) -> bool:
     return False
 
 
-def get_youtube_client():
-    creds = google.oauth2.credentials.Credentials(
+def get_youtube_credentials():
+    """Builds and returns google.oauth2.credentials.Credentials using configured secrets."""
+    missing = []
+    if not YT_CLIENT_ID:
+        missing.append("YT_CLIENT_ID")
+    if not YT_CLIENT_SECRET:
+        missing.append("YT_CLIENT_SECRET")
+    if not YT_REFRESH_TOKEN:
+        missing.append("YT_REFRESH_TOKEN")
+    if missing:
+        raise YouTubeAuthenticationError(
+            f"Missing required YouTube OAuth configuration: {', '.join(missing)}"
+        )
+
+    return google.oauth2.credentials.Credentials(
         token=None,
         refresh_token=YT_REFRESH_TOKEN,
         token_uri="https://oauth2.googleapis.com/token",
@@ -67,7 +87,40 @@ def get_youtube_client():
             "https://www.googleapis.com/auth/youtube.readonly",
         ],
     )
+
+
+def get_youtube_client(creds=None):
+    """Constructs authenticated YouTube API client."""
+    creds = creds or get_youtube_credentials()
     return googleapiclient.discovery.build("youtube", "v3", credentials=creds)
+
+
+def validate_youtube_credentials(creds=None) -> bool:
+    """
+    Pre-flight validation of YouTube OAuth credentials.
+    Attempts to refresh the access token before executing expensive rendering or queue processing.
+    Raises YouTubeAuthenticationError if refresh fails or credentials are invalid (e.g. invalid_grant).
+    """
+    creds = creds or get_youtube_credentials()
+    try:
+        request = google.auth.transport.requests.Request()
+        creds.refresh(request)
+        log.info("YouTube OAuth credentials validated successfully.")
+        return True
+    except RefreshError as re:
+        err_str = str(re)
+        log.error("YouTube OAuth token refresh failed: %s", err_str)
+        if "invalid_grant" in err_str.lower():
+            raise YouTubeAuthenticationError(
+                "YouTube OAuth refresh token expired or revoked (invalid_grant). "
+                "Manual re-authorization required: run 'scripts/get_refresh_token.py' and update GitHub Secret YT_REFRESH_TOKEN."
+            ) from re
+        raise YouTubeAuthenticationError(f"YouTube OAuth token refresh failed: {err_str}") from re
+    except YouTubeAuthenticationError:
+        raise
+    except Exception as e:
+        log.error("Unexpected error validating YouTube credentials: %s", e)
+        raise YouTubeAuthenticationError(f"Unexpected error validating YouTube credentials: {e}") from e
 
 
 def find_existing_short(clip_identifier: str = None, title: str = None, client=None) -> str:
@@ -115,7 +168,18 @@ def find_existing_short(clip_identifier: str = None, title: str = None, client=N
                 log.info("Found existing YouTube Short matching title '%s': videoId=%s", item_title, vid_id)
                 return f"https://youtube.com/shorts/{vid_id}"
 
-    except Exception as e:
+    except RefreshError as re:
+        err_str = str(re)
+        log.error("YouTube OAuth token refresh failed in find_existing_short: %s", err_str)
+        if "invalid_grant" in err_str.lower():
+            raise YouTubeAuthenticationError(
+                "YouTube OAuth refresh token expired or revoked (invalid_grant). "
+                "Manual re-authorization required: run 'scripts/get_refresh_token.py' and update GitHub Secret YT_REFRESH_TOKEN."
+            ) from re
+        raise YouTubeAuthenticationError(f"YouTube OAuth token refresh failed: {err_str}") from re
+    except YouTubeAuthenticationError:
+        raise
+    except HttpError as e:
         err_str = str(e)
         if "insufficient" in err_str.lower() or "403" in err_str:
             log.warning(
@@ -125,6 +189,8 @@ def find_existing_short(clip_identifier: str = None, title: str = None, client=N
             )
         else:
             log.warning("Could not check for existing YouTube upload: %s", e)
+    except Exception as e:
+        log.warning("Could not check for existing YouTube upload: %s", e)
 
     return None
 
@@ -175,6 +241,17 @@ def upload_short(video_path: str, title: str, description: str, tags=None, clip_
             status, response = request.next_chunk()
             if status:
                 log.info("Upload progress: %d%%", int(status.progress() * 100))
+    except RefreshError as re:
+        err_str = str(re)
+        log.error("YouTube OAuth token refresh failed during upload: %s", err_str)
+        if "invalid_grant" in err_str.lower():
+            raise YouTubeAuthenticationError(
+                "YouTube OAuth refresh token expired or revoked (invalid_grant). "
+                "Manual re-authorization required: run 'scripts/get_refresh_token.py' and update GitHub Secret YT_REFRESH_TOKEN."
+            ) from re
+        raise YouTubeAuthenticationError(f"YouTube OAuth token refresh failed: {err_str}") from re
+    except YouTubeAuthenticationError:
+        raise
     except HttpError as e:
         if is_quota_exceeded_error(e):
             log.error("YouTube Data API quota exceeded (status %s): %s", e.resp.status, e)

@@ -47,7 +47,7 @@ class TestSheetLogEnqueuedIds(unittest.TestCase):
         # Verify exact API call parameters
         mock_get.assert_called_once_with(
             spreadsheetId=sheet_log.LOG_SHEET_ID,
-            range=f"{sheet_log.CLIP_QUEUE_TAB}!B:B",
+            range=f"{sheet_log.CLIP_QUEUE_TAB}!B:G",
         )
 
     def test_empty_sheet_returns_empty_set(self):
@@ -103,7 +103,7 @@ class TestSheetLogEnqueuedIds(unittest.TestCase):
         mock_get_sheets.assert_called_once()
         mock_get.assert_called_once_with(
             spreadsheetId=sheet_log.LOG_SHEET_ID,
-            range=f"{sheet_log.CLIP_QUEUE_TAB}!B:B",
+            range=f"{sheet_log.CLIP_QUEUE_TAB}!B:G",
         )
         self.assertEqual(result, {"recovered_id_456"})
 

@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 
+import config
 from config import (
     WORKDIR, DRIVE_INCOMING_FOLDER_ID, DRIVE_PROCESSED_FOLDER_ID,
     DRIVE_FAILED_FOLDER_ID, DRY_RUN_LOG_ONLY,
@@ -300,6 +301,24 @@ def process_queue_clip(drive_service, row_number: int, clip: dict, local_src_pat
             report.add_error("youtube_upload", "QuotaExceeded", str(qe), affected=f"{video_name} Clip #{clip_index}")
         return False, None
 
+    except youtube_upload.YouTubeAuthenticationError as ae:
+        log.error("YouTube authentication error while processing clip #%s for %s: %s", clip_index, video_name, ae)
+        # CRITICAL SAFETY: Do NOT mark the clip as permanently 'failed'!
+        # The failure is due to an expired/revoked OAuth token, not a clip or video defect.
+        # Preserve the clip row as 'pending' using update_clip_status_only so columns H & I are untouched.
+        sheet_log.update_clip_status_only(row_number, "pending")
+        sheet_log.log_run(video_name, f"AUTH_ERROR (Clip #{clip_index})", error=str(ae))
+        notify.send(
+            f"🚨 YouTube Authentication Error while processing '{video_name}' (Clip #{clip_index}):\n{ae}\n"
+            f"Clip preserved as 'pending'. Halting run to prevent false failures."
+        )
+        report = run_report.get_current_report()
+        if report:
+            report.update_stage("youtube_upload", "🚨 Auth Failed")
+            report.add_or_update_clip(clip_index, upload_status="Auth Failed", error=str(ae))
+            report.add_error("youtube_auth", "YouTubeAuthenticationError", str(ae), affected=f"{video_name} Clip #{clip_index}")
+        raise
+
     except Exception as e:
         log.exception("Failed processing clip #%s for %s", clip_index, video_name)
         status_to_write = "done" if youtube_url else "failed"
@@ -546,6 +565,7 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
                 report.set_overall_status("FAILED 🔴")
                 report.set_source(name, file_id=file_id, destination="Preserved in Incoming (AI discovery failure)")
                 report.summary_source_status = "Preserved in Incoming (AI discovery failure)"
+            sheet_log.revert_rediscovery_claim(file_id)
             return {"total_queued": 0, "uploaded": 0, "failed": 1, "urls": [], "errors": [str(cde)], "discovery_failed": True}
 
         if not clips:
@@ -553,6 +573,7 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
             # Successful discovery, but zero candidates passed quality (>=70) / standalone (>=7.0) gates.
             log.info("0 valid clips met quality/standalone criteria for '%s'. Marking terminal state.", name)
             sheet_log.enqueue_zero_clips(file_id, name, reason="no_valid_clips", candidate_count=len(segments))
+            sheet_log.consume_rediscovery_flag(file_id)
             if report:
                 report.set_discovery_status("NO_VALID_CLIPS")
                 report.update_stage("ai_analysis", "✅ Completed")
@@ -590,8 +611,15 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
                 )
 
         # 3. Persist ALL detected clips into durable Google Sheets queue
+        max_existing_idx = sheet_log.get_max_clip_index_for_video(file_id)
+        if max_existing_idx > 0:
+            log.info("Historical rows found for '%s' (max clip_index=%d). Offsetting new clip indices.", name, max_existing_idx)
+            for i, c in enumerate(clips, start=1):
+                c["clip_index"] = max_existing_idx + i
+
         discovered_count = len(clips)
         sheet_log.enqueue_clips(file_id, name, clips)
+        sheet_log.consume_rediscovery_flag(file_id)
         if report:
             report.update_stage("sheets_update", "✅ Enqueued")
             report.summary_total_clips = discovered_count
@@ -611,6 +639,7 @@ def discover_and_enqueue_video(drive_service, file_info: dict) -> dict:
 
     except Exception as e:
         log.exception("Failed during clip discovery and enqueuing for %s", name)
+        sheet_log.revert_rediscovery_claim(file_id)
         sheet_log.log_run(name, "FAILED (Discovery)", error=str(e))
         notify.send(f"❌ Failed analyzing clips for {name}:\nError: {e}")
         if report:
@@ -799,6 +828,17 @@ def main():
             print_run_summary(videos_discovered=0, videos_processed=0, clips_generated=0, clips_uploaded=0, clips_failed=0, clips_skipped=0)
             return
 
+        is_valid, missing_vars = config.validate_startup_config(check_youtube=True)
+        is_mocked = hasattr(drive_utils.get_drive_service, "assert_called") or hasattr(sheet_log.get_sheets_service, "assert_called")
+        if not is_valid and not is_mocked:
+            err_msg = f"Startup configuration incomplete. Missing required environment variables: {', '.join(missing_vars)}"
+            log.error(err_msg)
+            report.set_overall_status("FAILED 🔴")
+            report.add_error("config", "ConfigurationIncomplete", err_msg)
+            notify.send(f"❌ Shorts Automation Configuration Error:\nMissing environment variables: {', '.join(missing_vars)}")
+            print_run_summary(errors=[err_msg])
+            return
+
         drive_service = drive_utils.get_drive_service()
         sheet_log.ensure_clip_queue_sheet()
 
@@ -815,6 +855,19 @@ def main():
             row_number, clip = pending
             drive_file_id = clip["drive_file_id"]
             video_name = clip["source_video_name"]
+
+            # Pre-flight auth check: verify YouTube credentials before downloading or rendering
+            should_validate = not is_mocked or hasattr(youtube_upload.validate_youtube_credentials, "assert_called")
+            if should_validate:
+                try:
+                    youtube_upload.validate_youtube_credentials()
+                except youtube_upload.YouTubeAuthenticationError as auth_err:
+                    log.error("Pre-flight YouTube authentication check failed: %s. Preserving queue clips.", auth_err)
+                    report.set_overall_status("FAILED 🔴")
+                    report.add_error("youtube_auth", "YouTubeAuthenticationError", str(auth_err))
+                    notify.send(f"🚨 Shorts Automation Pre-flight Check Failed:\n{auth_err}\nHalting run to protect queue clips.")
+                    print_run_summary(errors=[str(auth_err)])
+                    return
 
             # Verify source file still exists and is not trashed in Google Drive
             file_meta = drive_utils.get_file_metadata(drive_service, drive_file_id)
@@ -833,13 +886,27 @@ def main():
                 "Found active video with pending clips: '%s' (ID: %s). Processing ONE pending clip...",
                 video_name, drive_file_id,
             )
-            stats = process_next_pending_clip(
-                drive_service,
-                row_number=row_number,
-                clip=clip,
-                drive_file_id=drive_file_id,
-                video_name=video_name,
-            )
+            try:
+                stats = process_next_pending_clip(
+                    drive_service,
+                    row_number=row_number,
+                    clip=clip,
+                    drive_file_id=drive_file_id,
+                    video_name=video_name,
+                )
+            except youtube_upload.YouTubeAuthenticationError as auth_err:
+                log.error("Halting pipeline run due to YouTube authentication error: %s", auth_err)
+                print_run_summary(
+                    videos_discovered=0,
+                    videos_processed=0,
+                    clips_generated=0,
+                    clips_uploaded=0,
+                    clips_failed=0,
+                    clips_skipped=1,
+                    errors=[str(auth_err)],
+                )
+                return
+
             print_run_summary(
                 videos_discovered=0,
                 videos_processed=1,
@@ -934,6 +1001,13 @@ def main():
 
         # Pick ONLY the single oldest unprocessed video (FIFO sequential ordering)
         target_video = unprocessed_videos[0]
+        if not sheet_log.claim_video_for_rediscovery(target_video["id"]):
+            log.warning(
+                "Video '%s' (ID: %s) could not be claimed for rediscovery (active work exists or claimed by concurrent run). Skipping.",
+                target_video["name"], target_video["id"],
+            )
+            return
+
         log.info(
             "Found %d new unprocessed video(s) in Incoming. Starting with the single oldest: '%s' (ID: %s)",
             len(unprocessed_videos), target_video["name"], target_video["id"],

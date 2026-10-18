@@ -243,7 +243,7 @@ def claim_clip(row_number: int, service=None) -> bool:
     return True
 
 
-def get_next_pending_clip(service=None, target_drive_file_id: str = None):
+def get_next_pending_clip(service=None, target_drive_file_id: Optional[str] = None):
     """
     Finds the deterministic next pending clip to publish for the active video.
     Ordering:
@@ -274,10 +274,15 @@ def get_next_pending_clip(service=None, target_drive_file_id: str = None):
             return None
         target_drive_file_id = active[0]
 
+    if not target_drive_file_id:
+        return None
+
+    target_id = target_drive_file_id.strip()
+
     pending_candidates = []
     for idx, row in enumerate(rows[1:], start=2):  # Row 1 is header, 1-indexed for Sheets
         padded = row + [""] * (13 - len(row))
-        if padded[1].strip() == target_drive_file_id.strip():
+        if padded[1].strip() == target_id:
             status = padded[6].strip().lower()
             if status == "pending":
                 try:
@@ -395,7 +400,49 @@ def update_clip_status(row_number: int, status: str, youtube_url: str = "", erro
                 time.sleep(1.0 * attempt)
 
     log.error("Failed to update queue row %d after %d attempts: %s", row_number, max_retries, last_err)
-    raise last_err
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"Failed to update queue row {row_number}")
+
+
+def update_clip_status_only(row_number: int, status: str, service=None, max_retries: int = 3):
+    """
+    Updates ONLY the status (column G) and updated_at timestamp (column K) of a specific row,
+    without touching or overwriting column H (youtube_url) or column I (error).
+    Used for safe re-discovery marker transitions to preserve historical metadata.
+    """
+    service = service or get_sheets_service()
+    now = datetime.datetime.utcnow().isoformat()
+    last_err = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Update strictly column G (status)
+            service.spreadsheets().values().update(
+                spreadsheetId=LOG_SHEET_ID,
+                range=f"{CLIP_QUEUE_TAB}!G{row_number}",
+                valueInputOption="RAW",
+                body={"values": [[status]]},
+            ).execute()
+            # Update strictly column K (updated_at)
+            service.spreadsheets().values().update(
+                spreadsheetId=LOG_SHEET_ID,
+                range=f"{CLIP_QUEUE_TAB}!K{row_number}",
+                valueInputOption="RAW",
+                body={"values": [[now]]},
+            ).execute()
+            log.info("Updated queue row %d status only -> %s (attempt %d)", row_number, status, attempt)
+            return
+        except Exception as err:
+            last_err = err
+            log.warning("Attempt %d/%d to update queue row %d status failed: %s", attempt, max_retries, row_number, err)
+            if attempt < max_retries:
+                time.sleep(1.0 * attempt)
+
+    log.error("Failed to update queue row %d status after %d attempts: %s", row_number, max_retries, last_err)
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"Failed to update queue row {row_number} status")
 
 
 
@@ -500,7 +547,7 @@ def reset_stale_processing_clips(max_age_minutes: float = 60.0, service=None) ->
         padded = row + [""] * (11 - len(row))
         status = padded[6].strip().lower()
 
-        if status == "processing":
+        if status in ("processing", "rediscover_processing"):
             time_str = padded[10].strip() or padded[9].strip()
             should_reset = False
 
@@ -518,19 +565,24 @@ def reset_stale_processing_clips(max_age_minutes: float = 60.0, service=None) ->
                     if age_seconds >= max_age_minutes * 60:
                         should_reset = True
                         log.info(
-                            "Clip row %d was marked 'processing' %.1f minutes ago (>= %.1f min). Resetting to pending.",
-                            idx, age_seconds / 60, max_age_minutes,
+                            "Clip row %d was marked '%s' %.1f minutes ago (>= %.1f min). Resetting to %s.",
+                            idx, status, age_seconds / 60, max_age_minutes,
+                            "pending" if status == "processing" else "rediscover",
                         )
                 except Exception as err:
                     log.warning("Could not parse timestamp '%s' on row %d: %s. Defaulting to reset.", time_str, idx, err)
                     should_reset = True
 
             if should_reset:
-                update_clip_status(idx, "pending", service=service)
+                target_status = "pending" if status == "processing" else "rediscover"
+                if status == "rediscover_processing":
+                    update_clip_status_only(idx, target_status, service=service)
+                else:
+                    update_clip_status(idx, target_status, service=service)
                 reset_count += 1
 
     if reset_count > 0:
-        log.info("Reset %d stale 'processing' clip(s) back to 'pending'.", reset_count)
+        log.info("Reset %d stale processing/rediscovery clip(s).", reset_count)
     return reset_count
 
 
@@ -627,17 +679,26 @@ def get_video_clip_counts(drive_file_id: str, service=None) -> dict:
     if len(rows) <= 1:
         return counts
 
+    # Administrative/lifecycle markers that do NOT represent actionable clip items
+    NON_CLIP_MARKERS = {"rediscovered", "rediscover", "rediscover_processing", "cancelled"}
+
     for row in rows[1:]:
         if len(row) < 1:
             continue
         file_id = row[0].strip()
         if file_id == drive_file_id:
-            status = row[5].strip().lower() if len(row) > 5 else "pending"
-            if status != "no_valid_clips":
+            status = row[5].strip().lower() if len(row) > 5 and row[5].strip() else "unknown"
+            if status == "no_valid_clips":
+                counts["no_valid_clips"] += 1
+            elif status in NON_CLIP_MARKERS:
+                # Track marker presence without inflating actionable clip total or pending count
+                counts[status] = counts.get(status, 0) + 1
+            elif status in counts:
                 counts["total"] += 1
-            if status in counts:
                 counts[status] += 1
             else:
+                # Unknown / corrupted status: safely treat as an incomplete clip so video is not prematurely moved
+                counts["total"] += 1
                 counts["pending"] += 1
 
     return counts
@@ -687,8 +748,19 @@ def log_run(filename, status, detected_lang="", youtube_url="", title_1="", titl
 
 def get_enqueued_video_ids(service=None) -> set:
     """
-    Returns the set of all unique Google Drive file IDs that have ever been enqueued in clip_queue.
-    Guarantees that a long video is never duplicated or re-enqueued.
+    Returns the set of Google Drive file IDs that should be blocked from re-discovery.
+
+    A video is blocked if:
+    - It has any rows with active statuses (pending, processing, retry_after_quota_reset, rediscover_processing), OR
+    - It has only terminal rows (done, failed, no_valid_clips, cancelled, rediscovered) AND none
+      of those rows have been explicitly marked 'rediscover' by an operator, OR
+    - It has any row with an unknown or missing status (fail-safe protection).
+
+    This ensures:
+    - Completed historical videos remain deduplicated by default
+    - Videos with pending/active work are never re-discovered mid-processing
+    - An operator can authorize one-time re-discovery by setting status='rediscover' on any row
+      (consumed after successful enqueueing via consume_rediscovery_flag)
     """
     # Defensive guard: if a Google Drive Resource or other non-Sheets service is passed by mistake,
     # safely discard it and obtain a valid Google Sheets service.
@@ -701,17 +773,265 @@ def get_enqueued_video_ids(service=None) -> set:
         service = None
 
     service = service or get_sheets_service()
-    enqueued_ids = set()
+
+    ACTIVE_STATUSES = {"pending", "processing", "retry_after_quota_reset", "rediscover_processing"}
+    TERMINAL_STATUSES = {"done", "failed", "no_valid_clips", "cancelled", "rediscovered"}
+    REDISCOVER_STATUS = "rediscover"
+
+    active_ids = set()
+    terminal_ids = set()
+    rediscover_ids = set()
+
     try:
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
-            range=f"{CLIP_QUEUE_TAB}!B:B",
+            range=f"{CLIP_QUEUE_TAB}!B:G",
         ).execute()
         rows = resp.get("values", [])
         for row in rows[1:]:  # skip header row
-            if row and row[0].strip():
-                enqueued_ids.add(row[0].strip())
+            if not row or not row[0].strip():
+                continue
+            drive_id = row[0].strip()
+            status = row[5].strip().lower() if len(row) > 5 and row[5].strip() else ""
+            if status in ACTIVE_STATUSES:
+                active_ids.add(drive_id)
+            elif status == REDISCOVER_STATUS:
+                rediscover_ids.add(drive_id)
+            elif status in TERMINAL_STATUSES:
+                terminal_ids.add(drive_id)
+            else:
+                # Row with unknown or missing status — fail safely by treating as active (blocked)
+                active_ids.add(drive_id)
     except Exception as e:
         log.error("Could not fetch enqueued video IDs from clip_queue: %s", e)
         raise RuntimeError(f"Could not fetch enqueued video IDs from clip_queue: {e}") from e
-    return enqueued_ids
+
+    # Active work ALWAYS takes precedence.
+    # Blocked = all active IDs + terminal IDs that haven't been authorized for rediscovery.
+    blocked_ids = active_ids | (terminal_ids - rediscover_ids)
+
+    if rediscover_ids:
+        authorized = rediscover_ids - active_ids
+        if authorized:
+            log.info(
+                "Rediscovery authorized for %d video(s): %s",
+                len(authorized), ", ".join(sorted(authorized)),
+            )
+
+    return blocked_ids
+
+
+def mark_video_for_rediscovery(drive_file_id: str, service=None) -> bool:
+    """
+    Marks a historical video for re-discovery by setting the status of its
+    first terminal row to 'rediscover'. This signals get_enqueued_video_ids()
+    to exclude this video from the block list, allowing the next scheduled run
+    to re-analyze it from Incoming.
+
+    Active work ALWAYS takes precedence: if any row is 'pending', 'processing',
+    'retry_after_quota_reset', or 'rediscover_processing', re-discovery authorization is rejected.
+
+    Does NOT delete, modify YouTube URLs, or alter any other historical rows.
+    Returns True if a row was marked, False if active work exists or no terminal row was found.
+    """
+    try:
+        service = service or get_sheets_service()
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:G",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for rediscovery marking: %s", e)
+        return False
+
+    rows = resp.get("values", [])
+    active_statuses = {"pending", "processing", "retry_after_quota_reset", "rediscover_processing"}
+    terminal_statuses = {"done", "failed", "no_valid_clips", "cancelled", "rediscovered"}
+
+    # First verify no active row exists for this video
+    for row in rows[1:]:
+        if not row or not row[0].strip():
+            continue
+        file_id = row[0].strip()
+        status = row[5].strip().lower() if len(row) > 5 else ""
+        if file_id == drive_file_id and status in active_statuses:
+            log.warning(
+                "Cannot mark drive_file_id=%s for rediscovery: active work exists (status='%s').",
+                drive_file_id, status,
+            )
+            return False
+
+    for idx, row in enumerate(rows[1:], start=2):
+        if not row or not row[0].strip():
+            continue
+        file_id = row[0].strip()
+        status = row[5].strip().lower() if len(row) > 5 else ""
+        if file_id == drive_file_id and status in terminal_statuses:
+            update_clip_status_only(idx, "rediscover", service=service)
+            log.info(
+                "Marked row %d (drive_file_id=%s) as 'rediscover'. "
+                "Next scheduled run will re-analyze this video from Incoming.",
+                idx, drive_file_id,
+            )
+            return True
+
+    log.warning(
+        "No terminal row found for drive_file_id=%s. Cannot mark for rediscovery.",
+        drive_file_id,
+    )
+    return False
+
+
+def claim_video_for_rediscovery(drive_file_id: str, service=None) -> bool:
+    """
+    Atomically claims a video marked for rediscovery by transitioning its
+    'rediscover' row(s) to 'rediscover_processing'.
+    This prevents concurrent runs from both discovering the same video.
+
+    Returns:
+    - True: If video is brand-new (no rows in clip_queue), or successfully claimed ('rediscover' -> 'rediscover_processing').
+    - False: If active work exists ('pending', 'processing', 'retry_after_quota_reset', 'rediscover_processing'),
+      or if the video has historical rows but none are 'rediscover'.
+    """
+    try:
+        service = service or get_sheets_service()
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:G",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for rediscovery claim: %s", e)
+        # Default to True in test/unconfigured environments to allow brand-new video flow
+        return True
+
+    rows = resp.get("values", [])
+    active_statuses = {"pending", "processing", "retry_after_quota_reset", "rediscover_processing"}
+
+    has_video_rows = False
+    rediscover_row_indices = []
+
+    for idx, row in enumerate(rows[1:], start=2):
+        if not row or not row[0].strip():
+            continue
+        file_id = row[0].strip()
+        if file_id == drive_file_id:
+            has_video_rows = True
+            status = row[5].strip().lower() if len(row) > 5 else ""
+            if status in active_statuses:
+                log.warning("Cannot claim %s for rediscovery: active work exists (status='%s').", drive_file_id, status)
+                return False
+            if status == "rediscover":
+                rediscover_row_indices.append(idx)
+
+    # If brand-new video (not previously in queue), claim succeeds as no-op
+    if not has_video_rows:
+        return True
+
+    # If historical video but no rediscover row, cannot claim
+    if not rediscover_row_indices:
+        log.warning("Cannot claim %s for rediscovery: no 'rediscover' authorization row found.", drive_file_id)
+        return False
+
+    # Transition all rediscover rows to rediscover_processing
+    for idx in rediscover_row_indices:
+        update_clip_status_only(idx, "rediscover_processing", service=service)
+        log.info("Claimed row %d for rediscovery of %s ('rediscover_processing').", idx, drive_file_id)
+
+    return True
+
+
+def revert_rediscovery_claim(drive_file_id: str, service=None) -> int:
+    """
+    Reverts 'rediscover_processing' rows back to 'rediscover' upon discovery failure,
+    preserving the authorization state for a safe retry on subsequent runs.
+    """
+    try:
+        service = service or get_sheets_service()
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:G",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue to revert rediscovery claim: %s", e)
+        return 0
+
+    rows = resp.get("values", [])
+    reverted = 0
+    for idx, row in enumerate(rows[1:], start=2):
+        if not row or not row[0].strip():
+            continue
+        file_id = row[0].strip()
+        status = row[5].strip().lower() if len(row) > 5 else ""
+        if file_id == drive_file_id and status == "rediscover_processing":
+            update_clip_status_only(idx, "rediscover", service=service)
+            reverted += 1
+            log.info("Reverted row %d for %s back to 'rediscover' after discovery failure.", idx, drive_file_id)
+
+    return reverted
+
+
+def consume_rediscovery_flag(drive_file_id: str, service=None) -> int:
+    """
+    Transitions all 'rediscover' and 'rediscover_processing' rows for a given drive_file_id to 'rediscovered',
+    consuming the one-time re-discovery authorization after successful enqueueing.
+
+    This ensures the rediscovery flag is not permanently active:
+    - Next scheduled run will see 'rediscovered' (a terminal status) instead of 'rediscover'
+    - Combined with newly enqueued 'pending' rows, the video is fully blocked again
+    Returns the number of rows consumed. Returns 0 if no 'rediscover' rows exist (no-op for new videos).
+    """
+    try:
+        service = service or get_sheets_service()
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:G",
+        ).execute()
+    except Exception as e:
+        log.warning("Failed to fetch clip queue for rediscovery consumption: %s", e)
+        return 0
+
+    rows = resp.get("values", [])
+    consumed = 0
+
+    for idx, row in enumerate(rows[1:], start=2):
+        if not row or not row[0].strip():
+            continue
+        file_id = row[0].strip()
+        status = row[5].strip().lower() if len(row) > 5 else ""
+        if file_id == drive_file_id and status in ("rediscover", "rediscover_processing"):
+            update_clip_status_only(idx, "rediscovered", service=service)
+            consumed += 1
+            log.info(
+                "Consumed rediscovery flag for row %d (drive_file_id=%s) -> 'rediscovered'.",
+                idx, drive_file_id,
+            )
+
+    return consumed
+
+
+def get_max_clip_index_for_video(drive_file_id: str, service=None) -> int:
+    """
+    Returns the maximum clip_index recorded in clip_queue for a given drive_file_id.
+    Returns 0 if no historical clips exist or if previous entries had index 0 (e.g. no_valid_clips).
+    """
+    try:
+        service = service or get_sheets_service()
+        resp = service.spreadsheets().values().get(
+            spreadsheetId=LOG_SHEET_ID,
+            range=f"{CLIP_QUEUE_TAB}!B:C",
+        ).execute()
+        rows = resp.get("values", [])
+        if not rows or len(rows) <= 1:
+            return 0
+        max_idx = 0
+        for row in rows[1:]:
+            if not row or not row[0].strip():
+                continue
+            if row[0].strip() == drive_file_id and len(row) > 1:
+                idx = parse_sheet_int(row[1], default=0)
+                if idx > max_idx:
+                    max_idx = idx
+        return max_idx
+    except Exception as e:
+        log.warning("Could not fetch max clip_index for video %s: %s", drive_file_id, e)
+        return 0

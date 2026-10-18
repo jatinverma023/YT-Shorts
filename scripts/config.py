@@ -3,6 +3,7 @@ Central configuration. Everything is read from environment variables so that
 in GitHub Actions these come from Encrypted Secrets, and locally (for testing)
 you can use a .env file (never commit it).
 """
+import json
 import os
 
 try:
@@ -161,4 +162,36 @@ MAX_DESCRIPTION_CANDIDATES = int(os.environ.get("MAX_DESCRIPTION_CANDIDATES", "5
 MIN_PACKAGE_QUALITY_SCORE = float(os.environ.get("MIN_PACKAGE_QUALITY_SCORE", "70.0"))
 
 
+def validate_startup_config(check_youtube: bool = True) -> tuple:
+    """
+    Validates that all required environment variables are present, non-empty, and structurally sound.
+    Returns (is_valid: bool, missing_var_names: list).
+    Never exposes secret values or credentials.
+    """
+    missing = []
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    else:
+        try:
+            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+            required_sa_keys = ["client_email", "private_key"]
+            missing_sa = [k for k in required_sa_keys if not info.get(k)]
+            if missing_sa:
+                missing.append(f"GOOGLE_SERVICE_ACCOUNT_JSON (missing: {', '.join(missing_sa)})")
+        except Exception:
+            missing.append("GOOGLE_SERVICE_ACCOUNT_JSON (malformed JSON)")
 
+    if not LOG_SHEET_ID:
+        missing.append("LOG_SHEET_ID")
+    if not DRIVE_INCOMING_FOLDER_ID:
+        missing.append("DRIVE_INCOMING_FOLDER_ID")
+
+    if check_youtube:
+        if not YT_CLIENT_ID:
+            missing.append("YT_CLIENT_ID")
+        if not YT_CLIENT_SECRET:
+            missing.append("YT_CLIENT_SECRET")
+        if not YT_REFRESH_TOKEN:
+            missing.append("YT_REFRESH_TOKEN")
+
+    return (len(missing) == 0, missing)
