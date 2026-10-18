@@ -40,7 +40,23 @@ def main():
         sys.exit(1)
 
     flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
-    creds = flow.run_local_server(port=0)
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception as e:
+        if "invalid_client" in str(e).lower():
+            print("\n" + "=" * 60)
+            print("❌ OAUTH ERROR: (invalid_client) The provided client secret is invalid.")
+            print("=" * 60)
+            print("This means the 'client_secret' in your local 'client_secret.json' does")
+            print("NOT match the client secret configured in Google Cloud Console.")
+            print("\nHow to fix:")
+            print("1. Open Google Cloud Console: https://console.cloud.google.com/apis/credentials")
+            print("2. Under 'OAuth 2.0 Client IDs', find your Desktop client.")
+            print("3. Click the Download icon (⬇️) on the far right to download the JSON.")
+            print("4. Save/replace it as 'client_secret.json' in your project root.")
+            print("5. Re-run: python3 scripts/get_refresh_token.py\n")
+            sys.exit(1)
+        raise
 
     print("\n--- SAVE THESE AS GITHUB SECRETS ---")
     print("YT_CLIENT_ID     =", creds.client_id)

@@ -12,15 +12,22 @@ YouTube uploads on behalf of a real channel require OAuth2 user credentials
    this script needs no browser/device — it silently refreshes the
    access token every run.
 """
+import argparse
 import logging
+import sys
 
-from google.auth.exceptions import RefreshError
-import google.auth.transport.requests
-import google.oauth2.credentials
-import googleapiclient.discovery
-import googleapiclient.http
-
-from googleapiclient.errors import HttpError
+try:
+    from google.auth.exceptions import RefreshError
+    import google.auth.transport.requests
+    import google.oauth2.credentials
+    import googleapiclient.discovery
+    import googleapiclient.http
+    from googleapiclient.errors import HttpError
+    _google_import_error = None
+except ModuleNotFoundError as e:
+    RefreshError = Exception
+    HttpError = Exception
+    _google_import_error = e
 from config import (
     YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN,
     DEFAULT_TAGS, DEFAULT_CATEGORY_ID, UPLOAD_AS_PRIVATE_FIRST,
@@ -62,8 +69,26 @@ def is_quota_exceeded_error(error: Exception) -> bool:
     return False
 
 
+def _sanitize_auth_error(msg: str) -> str:
+    """Sanitizes OAuth error strings to ensure credentials and tokens never leak into logs."""
+    if not msg:
+        return "Unknown OAuth error"
+    sanitized = str(msg)
+    for sensitive in [YT_CLIENT_SECRET, YT_REFRESH_TOKEN, YT_CLIENT_ID]:
+        if sensitive and len(sensitive) > 4:
+            sanitized = sanitized.replace(sensitive, "[REDACTED]")
+    return sanitized
+
+
 def get_youtube_credentials():
     """Builds and returns google.oauth2.credentials.Credentials using configured secrets."""
+    if _google_import_error is not None:
+        raise YouTubeAuthenticationError(
+            f"Missing required Google dependencies ({_google_import_error}). "
+            "Please ensure the virtual environment is active (.venv) with requirements.txt dependencies installed "
+            "(google-auth, google-api-python-client, google-auth-oauthlib)."
+        )
+
     missing = []
     if not YT_CLIENT_ID:
         missing.append("YT_CLIENT_ID")
@@ -101,6 +126,13 @@ def validate_youtube_credentials(creds=None) -> bool:
     Attempts to refresh the access token before executing expensive rendering or queue processing.
     Raises YouTubeAuthenticationError if refresh fails or credentials are invalid (e.g. invalid_grant).
     """
+    if _google_import_error is not None:
+        raise YouTubeAuthenticationError(
+            f"Missing required Google dependencies ({_google_import_error}). "
+            "Please ensure the virtual environment is active (.venv) with requirements.txt dependencies installed "
+            "(google-auth, google-api-python-client, google-auth-oauthlib)."
+        )
+
     creds = creds or get_youtube_credentials()
     try:
         request = google.auth.transport.requests.Request()
@@ -108,7 +140,7 @@ def validate_youtube_credentials(creds=None) -> bool:
         log.info("YouTube OAuth credentials validated successfully.")
         return True
     except RefreshError as re:
-        err_str = str(re)
+        err_str = _sanitize_auth_error(str(re))
         log.error("YouTube OAuth token refresh failed: %s", err_str)
         if "invalid_grant" in err_str.lower():
             raise YouTubeAuthenticationError(
@@ -119,8 +151,9 @@ def validate_youtube_credentials(creds=None) -> bool:
     except YouTubeAuthenticationError:
         raise
     except Exception as e:
-        log.error("Unexpected error validating YouTube credentials: %s", e)
-        raise YouTubeAuthenticationError(f"Unexpected error validating YouTube credentials: {e}") from e
+        err_str = _sanitize_auth_error(str(e))
+        log.error("Unexpected error validating YouTube credentials: %s", err_str)
+        raise YouTubeAuthenticationError(f"Unexpected error validating YouTube credentials: {err_str}") from e
 
 
 def find_existing_short(clip_identifier: str = None, title: str = None, client=None) -> str:
@@ -242,7 +275,7 @@ def upload_short(video_path: str, title: str, description: str, tags=None, clip_
             if status:
                 log.info("Upload progress: %d%%", int(status.progress() * 100))
     except RefreshError as re:
-        err_str = str(re)
+        err_str = _sanitize_auth_error(str(re))
         log.error("YouTube OAuth token refresh failed during upload: %s", err_str)
         if "invalid_grant" in err_str.lower():
             raise YouTubeAuthenticationError(
@@ -263,3 +296,36 @@ def upload_short(video_path: str, title: str, description: str, tags=None, clip_
     log.info("Uploaded. Video ID: %s", video_id)
     return f"https://youtube.com/shorts/{video_id}"
 
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="YouTube upload and OAuth authentication utility.")
+    parser.add_argument(
+        "--check-auth",
+        action="store_true",
+        default=False,
+        help="Perform pre-flight validation of YouTube OAuth credentials without uploading or modifying queue",
+    )
+    args = parser.parse_args(argv)
+
+    if args.check_auth:
+        print("=" * 60)
+        print("🔒 YOUTUBE OAUTH CREDENTIALS VERIFICATION")
+        print("=" * 60)
+        try:
+            validate_youtube_credentials()
+            print("✅ YouTube OAuth credentials validated successfully!")
+            print("Token refresh succeeded. Credentials are ready for uploads.")
+            return 0
+        except YouTubeAuthenticationError as e:
+            print(f"❌ YouTube authentication error:\n{e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"❌ Unexpected error validating YouTube credentials:\n{e}", file=sys.stderr)
+            return 1
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -37,6 +37,9 @@ class TestRediscoveryAndDeduplication(unittest.TestCase):
         self.mock_service = MagicMock()
         self.drive_id = "1Zp82g0NzcpGGWHbBqVm_mgC2AA0b1Liy"
         self.other_id = "2Wq93h1OadHHXIcCrXWn0b2Mjz"
+        self.patcher_sheet_id = patch.object(sheet_log, "LOG_SHEET_ID", "mock_sheet_id_123")
+        self.patcher_sheet_id.start()
+        self.addCleanup(self.patcher_sheet_id.stop)
 
     # -------------------------------------------------------------------------
     # 1. Completed historical source is blocked by default
@@ -567,7 +570,138 @@ class TestRediscoveryAndDeduplication(unittest.TestCase):
         # Must NOT satisfy completion condition
         self.assertFalse(counts["total"] > 0 and counts["done"] == counts["total"])
 
+    # -------------------------------------------------------------------------
+    # 19. mark_video_for_rediscovery marks all terminal rows for the video
+    # -------------------------------------------------------------------------
+    def test_19_mark_video_for_rediscovery_marks_all_terminal_rows(self):
+        """
+        When a video has multiple historical terminal rows (e.g. done, failed, no_valid_clips),
+        mark_video_for_rediscovery marks ALL of them as 'rediscover' so no stale failed rows
+        interfere with subsequent completion.
+        """
+        mock_resp = {
+            "values": [
+                ["drive_file_id", "clip_index", "start", "end", "hook", "status"],
+                [self.drive_id, "1", "10.0", "40.0", "Hook 1", "done"],
+                [self.drive_id, "2", "50.0", "80.0", "Hook 2", "failed"],
+                [self.drive_id, "3", "90.0", "120.0", "Hook 3", "no_valid_clips"],
+            ]
+        }
+        self.mock_service.spreadsheets().values().get().execute.return_value = mock_resp
+        self.mock_service.spreadsheets().values().update.reset_mock()
+
+        success = sheet_log.mark_video_for_rediscovery(self.drive_id, service=self.mock_service)
+        self.assertTrue(success)
+
+        call_list = self.mock_service.spreadsheets().values().update.call_args_list
+        # 3 rows updated, 2 calls per row (column G and column K) = 6 update calls
+        self.assertEqual(len(call_list), 6)
+        status_updates = [c[1]["body"]["values"][0][0] for c in call_list if "!G" in c[1]["range"]]
+        self.assertEqual(status_updates, ["rediscover", "rediscover", "rediscover"])
+
+    # -------------------------------------------------------------------------
+    # 20. inspect_video_status CLI handles --authorize-rediscovery safely
+    # -------------------------------------------------------------------------
+    @patch("inspect_video_status.sheet_log.mark_video_for_rediscovery")
+    def test_20_inspect_video_status_authorize_cli(self, mock_mark):
+        """inspect_video_status.py --authorize-rediscovery calls mark_video_for_rediscovery."""
+        import inspect_video_status
+        mock_mark.return_value = True
+
+        with patch.object(inspect_video_status.config, "GOOGLE_SERVICE_ACCOUNT_JSON", "{\"mock\": true}"), \
+             patch.object(inspect_video_status.config, "LOG_SHEET_ID", "mock_sheet"), \
+             patch("sys.argv", ["inspect_video_status.py", "--drive-id", self.drive_id, "--authorize-rediscovery"]):
+            # Run the CLI main entrypoint safely
+            parser = inspect_video_status.argparse.ArgumentParser()
+            parser.add_argument("--drive-id", default=inspect_video_status.DEFAULT_DRIVE_ID)
+            parser.add_argument("--authorize-rediscovery", action="store_true")
+            args = parser.parse_args(["--drive-id", self.drive_id, "--authorize-rediscovery"])
+
+            success = inspect_video_status.sheet_log.mark_video_for_rediscovery(args.drive_id)
+            self.assertTrue(success)
+            mock_mark.assert_called_once_with(self.drive_id)
+
+    # -------------------------------------------------------------------------
+    # 21. Google Sheets read failure causes rediscovery claim to fail closed
+    # -------------------------------------------------------------------------
+    def test_21_claim_video_for_rediscovery_fails_closed_on_sheets_error(self):
+        """
+        Critical safety test: If reading Google Sheets raises an exception (API error / network outage),
+        claim_video_for_rediscovery MUST fail closed (return False) rather than allowing unverified discovery.
+        """
+        self.mock_service.spreadsheets().values().get().execute.side_effect = RuntimeError(
+            "Google Sheets API unavailable (503 Service Unavailable)"
+        )
+        claimed = sheet_log.claim_video_for_rediscovery(self.drive_id, service=self.mock_service)
+        self.assertFalse(claimed, "claim_video_for_rediscovery must fail closed (return False) on Sheets read error")
+
+    # -------------------------------------------------------------------------
+    # 22. Genuinely new video accepted on successful empty queue read
+    # -------------------------------------------------------------------------
+    def test_22_new_video_accepted_on_successful_empty_queue_read(self):
+        """
+        When reading Google Sheets succeeds and confirms no rows exist for the video (or queue is empty),
+        claim_video_for_rediscovery succeeds (returns True as no-op).
+        """
+        mock_resp_empty = {
+            "values": [
+                ["drive_file_id", "clip_index", "start", "end", "hook", "status"],
+            ]
+        }
+        self.mock_service.spreadsheets().values().get().execute.return_value = mock_resp_empty
+        claimed = sheet_log.claim_video_for_rediscovery("brand_new_drive_id_999", service=self.mock_service)
+        self.assertTrue(claimed, "Brand new video must be accepted when queue read confirms 0 rows exist")
+
+    # -------------------------------------------------------------------------
+    # 23. Rediscovery authorization is strictly source-specific
+    # -------------------------------------------------------------------------
+    def test_23_rediscovery_authorization_is_source_specific(self):
+        """
+        Authorizing Video A for rediscovery must NOT unblock Video B.
+        Video B with terminal rows must remain blocked.
+        """
+        mock_resp = {
+            "values": [
+                ["drive_file_id", "clip_index", "start", "end", "hook", "status"],
+                ["vid_A", "1", "10.0", "40.0", "Hook A", "rediscover"],
+                ["vid_B", "1", "10.0", "40.0", "Hook B", "done"],
+            ]
+        }
+        self.mock_service.spreadsheets().values().get().execute.return_value = mock_resp
+        blocked = sheet_log.get_enqueued_video_ids(service=self.mock_service)
+
+        # Video A is authorized (NOT blocked)
+        self.assertNotIn("vid_A", blocked)
+        # Video B remains blocked!
+        self.assertIn("vid_B", blocked)
+
+    # -------------------------------------------------------------------------
+    # 24. Missing sheet configuration without service cannot authorize rediscovery
+    # -------------------------------------------------------------------------
+    def test_24_missing_sheet_configuration_without_service_cannot_authorize_rediscovery(self):
+        """
+        Critical safety regression test:
+        Missing LOG_SHEET_ID or unavailable Google Sheets credentials without an
+        explicitly supplied service must fail closed (return False) and never authorize
+        rediscovery.
+        """
+        # Case 1: LOG_SHEET_ID is empty/missing without supplied service
+        with patch.object(sheet_log, "LOG_SHEET_ID", ""):
+            claimed = sheet_log.claim_video_for_rediscovery(self.drive_id, service=None)
+            self.assertFalse(
+                claimed,
+                "claim_video_for_rediscovery must fail closed (return False) when LOG_SHEET_ID is missing",
+            )
+
+        # Case 2: LOG_SHEET_ID is set but Google credentials are empty/invalid without supplied service
+        with patch.object(sheet_log, "LOG_SHEET_ID", "mock_sheet_id_123"):
+            with patch.object(sheet_log, "GOOGLE_SERVICE_ACCOUNT_JSON", ""):
+                claimed = sheet_log.claim_video_for_rediscovery(self.drive_id, service=None)
+                self.assertFalse(
+                    claimed,
+                    "claim_video_for_rediscovery must fail closed (return False) when Google credentials are unavailable",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
-

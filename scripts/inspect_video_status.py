@@ -110,7 +110,7 @@ def inspect_video_queue_status(drive_file_id: str):
         print("  Status: HISTORICAL TERMINAL ROWS ONLY (done / failed / no_valid_clips / cancelled)")
         print("  Action: Automatic rediscovery is BLOCKED by default (duplicate prevention).")
         print("  To authorize one-time re-discovery, an operator can run:")
-        print(f"      python -c \"import sheet_log; sheet_log.mark_video_for_rediscovery('{drive_file_id}')\"")
+        print(f"      python scripts/inspect_video_status.py --drive-id {drive_file_id} --authorize-rediscovery")
     else:
         print("  Status: UNKNOWN OR MIXED STATUSES")
         print("  Action: BLOCKED by default for safety.")
@@ -118,7 +118,30 @@ def inspect_video_queue_status(drive_file_id: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inspect clip_queue rows for a Google Drive video ID.")
+    parser = argparse.ArgumentParser(description="Inspect or authorize clip_queue rows for a Google Drive video ID.")
     parser.add_argument("--drive-id", default=DEFAULT_DRIVE_ID, help="Google Drive file ID to inspect")
+    parser.add_argument(
+        "--authorize-rediscovery",
+        action="store_true",
+        help="Explicitly authorize one-time re-discovery for this video in Google Sheets",
+    )
     args = parser.parse_args()
-    inspect_video_queue_status(args.drive_id)
+
+    if args.authorize_rediscovery:
+        print("=" * 80)
+        print(f"⚡ AUTHORIZING ONE-TIME REDISCOVERY FOR: {args.drive_id}")
+        print("=" * 80)
+        if not config.GOOGLE_SERVICE_ACCOUNT_JSON or not config.LOG_SHEET_ID:
+            print("\n❌ Google Sheets credentials are not configured in this environment.")
+            print("Configure GOOGLE_SERVICE_ACCOUNT_JSON and LOG_SHEET_ID to perform this update.")
+            sys.exit(1)
+        success = sheet_log.mark_video_for_rediscovery(args.drive_id)
+        if success:
+            print("\n✅ Successfully marked video for one-time re-discovery in clip_queue!")
+            print("The next scheduled run will re-analyze this video from Incoming.")
+        else:
+            print("\n❌ Could not authorize re-discovery.")
+            print("Either active work exists (pending/processing) or no terminal row was found.")
+            sys.exit(1)
+    else:
+        inspect_video_queue_status(args.drive_id)

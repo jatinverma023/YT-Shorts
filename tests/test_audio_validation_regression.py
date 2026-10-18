@@ -111,6 +111,7 @@ class TestAudioValidationRegression(unittest.TestCase):
     @patch("sheet_log.get_next_pending_clip", return_value=None)
     @patch("sheet_log.has_active_video_in_queue", return_value=False)
     @patch("sheet_log.ensure_clip_queue_sheet")
+    @patch("sheet_log.claim_video_for_rediscovery", return_value=True)
     @patch("sheet_log.get_enqueued_video_ids", return_value=set())
     @patch("drive_utils.get_drive_service")
     @patch("drive_utils.list_new_videos")
@@ -123,7 +124,7 @@ class TestAudioValidationRegression(unittest.TestCase):
     def test_failed_discovery_produces_non_zero_process_exit(
         self, mock_notify, mock_log_run, mock_extract_audio, mock_has_audio,
         mock_get_dur, mock_download, mock_list_new, mock_get_drive,
-        mock_get_enqueued, mock_ensure_sheet, mock_has_active, mock_get_pending,
+        mock_get_enqueued, mock_claim, mock_ensure_sheet, mock_has_active, mock_get_pending,
         mock_reset_quota,
     ):
         """A fatal discovery failure causes python main.py to exit with non-zero status (code 1)."""

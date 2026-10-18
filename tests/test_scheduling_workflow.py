@@ -109,6 +109,7 @@ class TestSchedulingWorkflow(unittest.TestCase):
         self.assertEqual(enqueued, {"file_abc_123", "file_xyz_789"})
 
     @patch("main.discover_and_enqueue_video")
+    @patch("sheet_log.claim_video_for_rediscovery", return_value=True)
     @patch("sheet_log.get_enqueued_video_ids", return_value={"already_processed_id_1"})
     @patch("drive_utils.list_new_videos")
     @patch("sheet_log.has_active_video_in_queue", return_value=False)
@@ -119,7 +120,7 @@ class TestSchedulingWorkflow(unittest.TestCase):
     def test_6_already_enqueued_video_skipped(
         self, mock_get_drive, mock_ensure_sheet, mock_reset_quota,
         mock_get_pending, mock_has_active, mock_list_new, mock_get_enqueued,
-        mock_discover,
+        mock_claim, mock_discover,
     ):
         """
         Critical Idempotency Test:

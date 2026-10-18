@@ -238,6 +238,7 @@ class TestSingleRunWorkflow(unittest.TestCase):
 
     @patch("sheet_log.reset_expired_quota_clips")
     @patch("main.discover_and_enqueue_video")
+    @patch("sheet_log.claim_video_for_rediscovery", return_value=True)
     @patch("sheet_log.get_enqueued_video_ids")
     @patch("drive_utils.list_new_videos")
     @patch("sheet_log.has_active_video_in_queue")
@@ -246,7 +247,8 @@ class TestSingleRunWorkflow(unittest.TestCase):
     @patch("drive_utils.get_drive_service")
     def test_9_two_source_videos_fifo_ordering(
         self, mock_get_drive, mock_ensure_sheet, mock_get_pending,
-        mock_has_active, mock_list_videos, mock_get_enqueued, mock_discover, mock_reset_quota
+        mock_has_active, mock_list_videos, mock_get_enqueued, mock_claim,
+        mock_discover, mock_reset_quota
     ):
         """When two new videos exist in Incoming, main() picks ONLY the oldest video (FIFO)."""
         mock_get_pending.return_value = None

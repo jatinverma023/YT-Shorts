@@ -861,6 +861,7 @@ def mark_video_for_rediscovery(drive_file_id: str, service=None) -> bool:
             )
             return False
 
+    marked_count = 0
     for idx, row in enumerate(rows[1:], start=2):
         if not row or not row[0].strip():
             continue
@@ -868,12 +869,15 @@ def mark_video_for_rediscovery(drive_file_id: str, service=None) -> bool:
         status = row[5].strip().lower() if len(row) > 5 else ""
         if file_id == drive_file_id and status in terminal_statuses:
             update_clip_status_only(idx, "rediscover", service=service)
+            marked_count += 1
             log.info(
                 "Marked row %d (drive_file_id=%s) as 'rediscover'. "
                 "Next scheduled run will re-analyze this video from Incoming.",
                 idx, drive_file_id,
             )
-            return True
+
+    if marked_count > 0:
+        return True
 
     log.warning(
         "No terminal row found for drive_file_id=%s. Cannot mark for rediscovery.",
@@ -894,15 +898,17 @@ def claim_video_for_rediscovery(drive_file_id: str, service=None) -> bool:
       or if the video has historical rows but none are 'rediscover'.
     """
     try:
+        if not LOG_SHEET_ID:
+            log.error("LOG_SHEET_ID is not configured. Cannot claim video for rediscovery.")
+            return False
         service = service or get_sheets_service()
         resp = service.spreadsheets().values().get(
             spreadsheetId=LOG_SHEET_ID,
             range=f"{CLIP_QUEUE_TAB}!B:G",
         ).execute()
     except Exception as e:
-        log.warning("Failed to fetch clip queue for rediscovery claim: %s", e)
-        # Default to True in test/unconfigured environments to allow brand-new video flow
-        return True
+        log.error("Failed to fetch clip queue for rediscovery claim: %s", e)
+        return False
 
     rows = resp.get("values", [])
     active_statuses = {"pending", "processing", "retry_after_quota_reset", "rediscover_processing"}

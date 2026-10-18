@@ -262,6 +262,69 @@ class TestAuthReliability(unittest.TestCase):
         mock_process_next.assert_not_called()
         self.assertTrue(any("Pre-flight Check Failed" in str(c) for c in mock_notify.call_args_list))
 
+    # -------------------------------------------------------------------------
+    # 6. youtube_upload.py CLI entrypoint & Safety
+    # -------------------------------------------------------------------------
+    @patch("youtube_upload.validate_youtube_credentials")
+    def test_youtube_upload_cli_check_auth_opt_in(self, mock_validate):
+        """--check-auth is explicitly opt-in: omitted flag does not run validation; supplied flag runs validation."""
+        mock_validate.return_value = True
+
+        # When --check-auth is omitted, validation is NOT executed (opt-in)
+        code_omitted = youtube_upload.main([])
+        self.assertEqual(code_omitted, 0)
+        mock_validate.assert_not_called()
+
+        # When --check-auth is explicitly supplied, validation is executed
+        code_supplied = youtube_upload.main(["--check-auth"])
+        self.assertEqual(code_supplied, 0)
+        mock_validate.assert_called_once()
+
+    @patch("youtube_upload.validate_youtube_credentials")
+    def test_youtube_upload_cli_check_auth_failure_exits_nonzero(self, mock_validate):
+        """When preflight auth check fails, CLI exits with nonzero status."""
+        mock_validate.side_effect = youtube_upload.YouTubeAuthenticationError("Invalid credentials")
+
+        code = youtube_upload.main(["--check-auth"])
+        self.assertEqual(code, 1)
+
+    def test_sanitize_auth_error_redacts_secrets(self):
+        """Sensitive client secrets and refresh tokens are strictly redacted from error messages."""
+        with patch.object(youtube_upload, "YT_CLIENT_SECRET", "super_secret_client_secret_xyz123"), \
+             patch.object(youtube_upload, "YT_REFRESH_TOKEN", "1//04_refresh_token_abc789"):
+            raw_msg = (
+                "Failed to refresh with secret super_secret_client_secret_xyz123 "
+                "and token 1//04_refresh_token_abc789"
+            )
+            sanitized = youtube_upload._sanitize_auth_error(raw_msg)
+            self.assertNotIn("super_secret_client_secret_xyz123", sanitized)
+            self.assertNotIn("1//04_refresh_token_abc789", sanitized)
+            self.assertIn("[REDACTED]", sanitized)
+
+    def test_missing_google_dependencies_raises_clear_auth_error(self):
+        """When google module is missing, validate_youtube_credentials raises informative YouTubeAuthenticationError."""
+        with patch.object(youtube_upload, "_google_import_error", ModuleNotFoundError("No module named 'google'")):
+            with self.assertRaises(youtube_upload.YouTubeAuthenticationError) as ctx:
+                youtube_upload.validate_youtube_credentials()
+            self.assertIn("Missing required Google dependencies", str(ctx.exception))
+            self.assertIn("requirements.txt", str(ctx.exception))
+
+    @patch("youtube_upload.upload_short")
+    @patch("sheet_log.update_clip_status")
+    @patch("youtube_upload.google.auth.transport.requests.Request")
+    def test_validate_youtube_credentials_does_not_upload_or_mutate_queue(
+        self, mock_req, mock_sheet_update, mock_upload
+    ):
+        """Preflight auth validation performs only token refresh and never uploads video or mutates queue."""
+        mock_creds = MagicMock()
+        mock_creds.refresh.return_value = None
+
+        result = youtube_upload.validate_youtube_credentials(creds=mock_creds)
+        self.assertTrue(result)
+        mock_creds.refresh.assert_called_once()
+        mock_upload.assert_not_called()
+        mock_sheet_update.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
